@@ -1,8 +1,8 @@
 # Support Engineering Workbench
 
-**Status: M1 working foundation.**
+**Status: M2 manual support workflow implementation; independent review and Product Owner acceptance are pending.**
 
-M1 provides a read-only case queue, three synthetic initial reports, SQLite persistence, and transaction/idempotency infrastructure. It does not include case-editing workflows, diagnostics, AI analysis, or external messaging. See [local setup and M1 verification](docs/SETUP.md).
+M1 provides three synthetic initial reports, SQLite persistence, and transaction/idempotency infrastructure. M2 adds status filtering, chronological case history, internal notes, clearly labeled simulated replies, status transitions, escalation, and resolution. The manual workflow works without AI credentials and never sends external messages. Diagnostic investigation and AI analysis remain future milestones. See [local setup and manual workflow verification](docs/SETUP.md).
 
 A public portfolio project demonstrating a local-first technical support workbench for investigating fictional SaaS API integration issues, inspecting diagnostic evidence, and reviewing AI-assisted recommendations before a human records an outcome.
 
@@ -24,7 +24,7 @@ Three reproducible synthetic scenarios: authentication errors incorrectly labele
 
 ## Approved architecture
 
-The approved design uses JavaScript ES modules, React/Vite, Express, SQLite through node:sqlite, and an optional server-side OpenAI Responses API. The setup guide records the commands verified for the current M1 implementation.
+The approved design uses JavaScript ES modules, React/Vite, Express, SQLite through node:sqlite, and an optional server-side OpenAI Responses API. The setup guide records the commands and browser checks for the current M2 implementation.
 
 ## Engineering approach
 

@@ -2,7 +2,7 @@
 
 **Approved baseline.** On 2026-10-20 the Product Owner stated: “Product Owner Decision: Technical Plan v1.1 APPROVED” and approved [Product Brief v1.0](PRODUCT_BRIEF.md) together with this plan as the implementation baseline.
 
-This document consolidates the accepted v1.0 technical decisions with the approved v1.1 changes. It records an actual human planning decision, not implementation, reviewer, CI, live inference, or product acceptance evidence. The current bootstrap assignment is repository/document preparation and an M1 handoff; application work has not started.
+This document consolidates the accepted v1.0 technical decisions with the approved v1.1 changes. It records an actual human planning decision, not implementation, reviewer, CI, live inference, or product acceptance evidence. The subsequent M1 assignment was integrated at `32214410010d9d7281ca36b9c730a2d564d24f1f`; on 2026-10-20 the Product Owner authorized M2 implementation from that base. This status note does not claim M2 review, CI, or product acceptance.
 
 ## 1. Changes from v1.0
 

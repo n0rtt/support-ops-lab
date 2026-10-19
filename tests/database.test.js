@@ -13,6 +13,7 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { pathToFileURL } from 'node:url';
 import { test } from 'node:test';
+import { DatabaseSync } from 'node:sqlite';
 import {
   demoDatabasePath,
   initializeDatabase,
@@ -32,7 +33,7 @@ test('initialization migrates and seeds once without replacing existing records'
   initializeDatabase(db);
   initializeDatabase(db);
 
-  assert.equal(db.prepare('PRAGMA user_version').get().user_version, 1);
+  assert.equal(db.prepare('PRAGMA user_version').get().user_version, 2);
   assert.deepEqual(
     db.prepare("SELECT name FROM sqlite_master WHERE type = 'table' AND name NOT LIKE 'sqlite_%' ORDER BY name")
       .all()
@@ -47,6 +48,42 @@ test('initialization migrates and seeds once without replacing existing records'
   assert.deepEqual(
     { ...db.prepare('SELECT status, version FROM cases WHERE id = ?').get('SEW-1001') },
     { status: 'resolved', version: 4 },
+  );
+});
+
+test('M2 activity-order migration preserves existing cases, activities, and receipts', (t) => {
+  const { databasePath } = temporaryDatabase(t);
+  const db = new DatabaseSync(databasePath);
+  db.exec('PRAGMA foreign_keys = ON');
+  db.exec(
+    "CREATE TABLE cases (id TEXT PRIMARY KEY, organization_id TEXT NOT NULL, organization_name TEXT NOT NULL, subject TEXT NOT NULL, channel TEXT NOT NULL CHECK (channel IN ('email', 'telegram', 'manual')), priority TEXT NOT NULL CHECK (priority IN ('low', 'medium', 'high', 'urgent')), status TEXT NOT NULL CHECK (status IN ('open', 'in_progress', 'escalated', 'resolved')), created_at TEXT NOT NULL, updated_at TEXT NOT NULL, version INTEGER NOT NULL DEFAULT 1 CHECK (version > 0)) STRICT; " +
+      'CREATE TABLE activities (id TEXT PRIMARY KEY, case_id TEXT NOT NULL REFERENCES cases(id) ON DELETE CASCADE, created_at TEXT NOT NULL, activity_type TEXT NOT NULL, payload TEXT NOT NULL) STRICT; ' +
+      'CREATE TABLE mutation_receipts (request_key TEXT PRIMARY KEY CHECK (length(request_key) BETWEEN 1 AND 200), fingerprint TEXT NOT NULL, response_json TEXT NOT NULL, created_at TEXT NOT NULL) STRICT; ' +
+      "INSERT INTO cases VALUES ('SEW-OLD', 'ORG-OLD', 'Old fictional organization', 'Existing issue', 'email', 'low', 'open', '2026-10-01T00:00:00.000Z', '2026-10-01T00:00:00.000Z', 3); " +
+      "INSERT INTO activities VALUES ('ACT-OLD', 'SEW-OLD', '2026-10-01T00:00:00.000Z', 'note', '{\"text\":\"Existing history\"}'); " +
+      "INSERT INTO mutation_receipts VALUES ('old-request', 'fingerprint', '{\"ok\":true}', '2026-10-01T00:00:00.000Z'); " +
+      'PRAGMA user_version = 1;',
+  );
+  t.after(() => db.close());
+
+  initializeDatabase(db);
+
+  assert.equal(db.prepare('PRAGMA user_version').get().user_version, 2);
+  assert.deepEqual(
+    { ...db.prepare('SELECT id, status, version FROM cases WHERE id = ?').get('SEW-OLD') },
+    { id: 'SEW-OLD', status: 'open', version: 3 },
+  );
+  assert.equal(db.prepare('SELECT payload FROM activities WHERE id = ?').get('ACT-OLD').payload, '{"text":"Existing history"}');
+  assert.equal(db.prepare('SELECT response_json FROM mutation_receipts WHERE request_key = ?').get('old-request').response_json, '{"ok":true}');
+  assert.deepEqual(
+    db.prepare("SELECT name FROM sqlite_master WHERE type = 'table' AND name NOT LIKE 'sqlite_%' ORDER BY name")
+      .all()
+      .map((row) => row.name),
+    ['activities', 'cases', 'mutation_receipts'],
+  );
+  assert.deepEqual(
+    db.prepare('PRAGMA index_info(activities_case_order)').all().map((row) => row.name),
+    ['case_id', 'created_at', 'id'],
   );
 });
 

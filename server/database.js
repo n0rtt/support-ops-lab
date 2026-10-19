@@ -1,4 +1,4 @@
-import { createHash } from 'node:crypto';
+import { createHash, randomUUID } from 'node:crypto';
 import { lstatSync, mkdirSync, realpathSync } from 'node:fs';
 import { dirname, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -18,6 +18,12 @@ const migrations = [
           'CREATE TABLE activities (id TEXT PRIMARY KEY, case_id TEXT NOT NULL REFERENCES cases(id) ON DELETE CASCADE, created_at TEXT NOT NULL, activity_type TEXT NOT NULL, payload TEXT NOT NULL) STRICT; ' +
           'CREATE TABLE mutation_receipts (request_key TEXT PRIMARY KEY CHECK (length(request_key) BETWEEN 1 AND 200), fingerprint TEXT NOT NULL, response_json TEXT NOT NULL, created_at TEXT NOT NULL) STRICT;',
       );
+    },
+  },
+  {
+    version: 2,
+    up(db) {
+      db.exec('CREATE INDEX activities_case_order ON activities (case_id, created_at, id)');
     },
   },
 ];
@@ -101,25 +107,101 @@ export function initializeDatabase(db) {
   seedIfEmpty(db);
 }
 
-export function listCases(db) {
-  return db
-    .prepare(
-      "SELECT c.id, c.organization_id, c.organization_name, c.subject, c.channel, c.priority, c.status, c.created_at, c.updated_at, c.version, a.payload AS initial_report FROM cases AS c LEFT JOIN activities AS a ON a.case_id = c.id AND a.activity_type = 'initial_report' ORDER BY c.created_at DESC, c.id",
-    )
-    .all()
-    .map((row) => ({
-      id: row.id,
-      organizationId: row.organization_id,
-      organizationName: row.organization_name,
-      subject: row.subject,
-      channel: row.channel,
-      priority: row.priority,
-      status: row.status,
-      createdAt: row.created_at,
-      updatedAt: row.updated_at,
-      version: row.version,
-      initialReport: row.initial_report ? JSON.parse(row.initial_report).text : null,
+function mapCase(row) {
+  return {
+    id: row.id,
+    organizationId: row.organization_id,
+    organizationName: row.organization_name,
+    subject: row.subject,
+    channel: row.channel,
+    priority: row.priority,
+    status: row.status,
+    createdAt: row.created_at,
+    updatedAt: row.updated_at,
+    version: row.version,
+    initialReport: row.initial_report ? JSON.parse(row.initial_report).text : null,
+  };
+}
+
+const caseSelect =
+  "SELECT c.id, c.organization_id, c.organization_name, c.subject, c.channel, c.priority, c.status, c.created_at, c.updated_at, c.version, a.payload AS initial_report FROM cases AS c LEFT JOIN activities AS a ON a.case_id = c.id AND a.activity_type = 'initial_report'";
+
+export function listCases(db, status) {
+  const query = caseSelect + (status ? ' WHERE c.status = ?' : '') + ' ORDER BY c.created_at DESC, c.id';
+  return (status ? db.prepare(query).all(status) : db.prepare(query).all()).map(mapCase);
+}
+
+export function getCase(db, caseId) {
+  const row = db.prepare(caseSelect + ' WHERE c.id = ?').get(caseId);
+  if (!row) return null;
+  const item = mapCase(row);
+  item.activities = db
+    .prepare('SELECT id, created_at, activity_type, payload FROM activities WHERE case_id = ? ORDER BY created_at, id')
+    .all(caseId)
+    .map((activity) => ({
+      id: activity.id,
+      createdAt: activity.created_at,
+      type: activity.activity_type,
+      payload: JSON.parse(activity.payload),
     }));
+  return item;
+}
+
+export function appendCaseActivity(db, { caseId, type, text, now = new Date().toISOString() }) {
+  const id = 'ACT-' + randomUUID();
+  db.prepare('UPDATE cases SET updated_at = ?, version = version + 1 WHERE id = ?').run(now, caseId);
+  db.prepare(
+    'INSERT INTO activities (id, case_id, created_at, activity_type, payload) VALUES (?, ?, ?, ?, ?)',
+  ).run(id, caseId, now, type, JSON.stringify({ text }));
+  const version = db.prepare('SELECT version FROM cases WHERE id = ?').get(caseId).version;
+  return { changed: true, response: { caseId, activityId: id, version } };
+}
+
+const allowedTransitions = {
+  open: new Set(['in_progress', 'escalated', 'resolved']),
+  in_progress: new Set(['escalated', 'resolved']),
+  escalated: new Set(['in_progress', 'resolved']),
+  resolved: new Set(),
+};
+
+export class InvalidCaseTransitionError extends Error {
+  constructor() {
+    super('The requested status transition is not allowed.');
+    this.code = 'invalid_transition';
+  }
+}
+
+export class InvalidEscalationEvidenceError extends Error {
+  constructor() {
+    super('Diagnostic evidence is unavailable in this milestone.');
+    this.code = 'invalid_evidence';
+  }
+}
+
+export function changeCaseStatus(db, { caseId, status, context = {}, now = new Date().toISOString() }) {
+  const current = db.prepare('SELECT status FROM cases WHERE id = ?').get(caseId);
+  if (current.status === status) {
+    return {
+      changed: false,
+      response: { caseId, status, version: db.prepare('SELECT version FROM cases WHERE id = ?').get(caseId).version },
+    };
+  }
+  if (!allowedTransitions[current.status]?.has(status)) throw new InvalidCaseTransitionError();
+  if (status === 'escalated' && (!Array.isArray(context.evidenceIds) || context.evidenceIds.length !== 0)) {
+    throw new InvalidEscalationEvidenceError();
+  }
+
+  const activityId = 'ACT-' + randomUUID();
+  db.prepare('UPDATE cases SET status = ?, updated_at = ?, version = version + 1 WHERE id = ?').run(
+    status,
+    now,
+    caseId,
+  );
+  db.prepare(
+    'INSERT INTO activities (id, case_id, created_at, activity_type, payload) VALUES (?, ?, ?, ?, ?)',
+  ).run(activityId, caseId, now, 'status_changed', JSON.stringify({ from: current.status, to: status, ...context }));
+  const version = db.prepare('SELECT version FROM cases WHERE id = ?').get(caseId).version;
+  return { changed: true, response: { caseId, status, activityId, version } };
 }
 
 export class IdempotencyKeyReusedError extends Error {
