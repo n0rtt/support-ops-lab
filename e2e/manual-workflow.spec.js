@@ -3,6 +3,15 @@ import { expect, test } from '@playwright/test';
 test('manual resolution preserves history, simulated labeling, selection, and case draft', async ({ page }) => {
   await page.goto('/');
   await expect(page.getByText('M2 manual workflow · no AI credentials needed')).toBeVisible();
+  await expect(page).toHaveURL(/#SEW-1003$/);
+  await page.getByRole('button', { name: /SEW-1002/ }).click();
+  await expect(page).toHaveURL(/#SEW-1002$/);
+  await page.goBack();
+  await expect(page).toHaveURL(/#SEW-1003$/);
+  await expect(page.getByRole('heading', { name: 'Intermittent API failures with no request IDs' })).toBeVisible();
+  await page.goForward();
+  await expect(page).toHaveURL(/#SEW-1002$/);
+  await expect(page.getByRole('heading', { name: 'Subscription updates are not appearing' })).toBeVisible();
   await page.getByRole('button', { name: /SEW-1001/ }).click();
   await page.getByLabel('Filter cases by status').selectOption('open');
 

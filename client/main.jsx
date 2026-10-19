@@ -11,9 +11,17 @@ const statusTargets = {
   resolved: [],
 };
 const draftStorageKey = 'supportops.case-drafts.v1';
-const selectionStorageKey = 'supportops.selected-case.v1';
 const filterStorageKey = 'supportops.queue-filter.v1';
 const pendingStorageKey = 'supportops.pending-actions.v1';
+
+function selectedCaseFromHash() {
+  try {
+    const caseId = decodeURIComponent(window.location.hash.slice(1));
+    return /^[A-Za-z0-9][A-Za-z0-9_-]{0,63}$/.test(caseId) ? caseId : null;
+  } catch {
+    return null;
+  }
+}
 
 function readStorage(storage, key, fallback) {
   try {
@@ -64,7 +72,7 @@ function activitySummary(activity) {
 
 function App() {
   const [cases, setCases] = useState([]);
-  const [selectedId, setSelectedId] = useState(() => readStorage(sessionStorage, selectionStorageKey, null));
+  const [selectedId, setSelectedId] = useState(selectedCaseFromHash);
   const [selectedCase, setSelectedCase] = useState(null);
   const [statusFilter, setStatusFilter] = useState(() => readStorage(sessionStorage, filterStorageKey, 'all'));
   const [drafts, setDrafts] = useState(() => readStorage(localStorage, draftStorageKey, {}));
@@ -108,8 +116,20 @@ function App() {
   }, [statusFilter]);
 
   useEffect(() => {
+    const syncSelection = () => setSelectedId(selectedCaseFromHash());
+    window.addEventListener('hashchange', syncSelection);
+    window.addEventListener('popstate', syncSelection);
+    return () => {
+      window.removeEventListener('hashchange', syncSelection);
+      window.removeEventListener('popstate', syncSelection);
+    };
+  }, []);
+
+  useEffect(() => {
     if (loadState !== 'ready' || selectedId || cases.length === 0) return;
-    setSelectedId(cases[0].id);
+    const firstCaseId = cases[0].id;
+    window.history.replaceState(null, '', '#' + encodeURIComponent(firstCaseId));
+    setSelectedId(firstCaseId);
   }, [cases, loadState, selectedId]);
 
   useEffect(() => {
@@ -137,11 +157,11 @@ function App() {
   }, [selectedId]);
 
   function chooseCase(caseId) {
-    saveStorage(sessionStorage, selectionStorageKey, caseId);
     if (selectedId === caseId) {
       refreshCase(caseId).catch(() => setDetailError('This case could not be loaded. The selection was kept; choose another case only if you intend to.'));
       return;
     }
+    window.history.pushState(null, '', '#' + encodeURIComponent(caseId));
     setSelectedId(caseId);
     setSelectedCase(null);
   }
