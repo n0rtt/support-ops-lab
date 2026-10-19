@@ -1,6 +1,8 @@
 # Support Engineering Workbench
 
-**Status: planning approved; implementation not started.**
+**Status: M1 working foundation.**
+
+M1 provides a read-only case queue, three synthetic initial reports, SQLite persistence, and transaction/idempotency infrastructure. It does not include case-editing workflows, diagnostics, AI analysis, or external messaging. See [local setup and M1 verification](docs/SETUP.md).
 
 A public portfolio project demonstrating a local-first technical support workbench for investigating fictional SaaS API integration issues, inspecting diagnostic evidence, and reviewing AI-assisted recommendations before a human records an outcome.
 
@@ -20,9 +22,9 @@ Three reproducible synthetic scenarios: authentication errors incorrectly labele
 - [Technical Plan v1.1](docs/TECHNICAL_PLAN.md)
 - [Agent workflow rules](AGENTS.md)
 
-## Intended implementation
+## Approved architecture
 
-JavaScript ES modules; React/Vite; Express; SQLite via `node:sqlite`; optional server-side OpenAI Responses API. This is a **plan**, not a description of implemented features. Actual setup commands, screenshots, tests, and CI evidence will be added after implementation and verification.
+The approved design uses JavaScript ES modules, React/Vite, Express, SQLite through node:sqlite, and an optional server-side OpenAI Responses API. The setup guide records the commands verified for the current M1 implementation.
 
 ## Engineering approach
 

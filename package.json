@@ -1,0 +1,25 @@
+{
+  "name": "support-engineering-workbench",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "engines": {
+    "node": "24.15.0"
+  },
+  "scripts": {
+    "db:init": "node scripts/db-init.js",
+    "demo:reset": "node scripts/demo-reset.js",
+    "build": "vite build",
+    "start": "node server/index.js",
+    "test": "node --test"
+  },
+  "dependencies": {
+    "express": "5.2.0",
+    "react": "19.2.8",
+    "react-dom": "19.2.8"
+  },
+  "devDependencies": {
+    "@vitejs/plugin-react": "6.1.2",
+    "vite": "8.3.4"
+  }
+}
