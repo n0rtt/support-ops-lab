@@ -1,5 +1,5 @@
 import { createHash } from 'node:crypto';
-import { existsSync, lstatSync, mkdirSync, realpathSync } from 'node:fs';
+import { lstatSync, mkdirSync, realpathSync } from 'node:fs';
 import { dirname, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { DatabaseSync } from 'node:sqlite';
@@ -196,10 +196,31 @@ export function runIdempotentMutation(db, request, mutate) {
     if (currentCase.version !== expectedVersion) throw new StaleCaseError();
 
     // node:sqlite transactions must not span awaits.
-    const response = mutate(db);
-    if (response && typeof response.then === 'function') {
+    const beforeChanges = db.prepare('SELECT total_changes() AS count').get().count;
+    const result = mutate(db);
+    if (result && typeof result.then === 'function') {
       throw new TypeError('Mutation callbacks must be synchronous.');
     }
+    if (
+      !result ||
+      typeof result !== 'object' ||
+      Array.isArray(result) ||
+      typeof result.changed !== 'boolean' ||
+      !Object.hasOwn(result, 'response')
+    ) {
+      throw new TypeError('Mutation callbacks must return { changed, response }.');
+    }
+    const afterCase = db.prepare('SELECT version FROM cases WHERE id = ?').get(caseId);
+    const expectedResultVersion = expectedVersion + Number(result.changed);
+    if (!afterCase || afterCase.version !== expectedResultVersion) {
+      throw new Error(
+        'Mutation callbacks must advance the case version exactly once for changes and leave it unchanged for no-ops.',
+      );
+    }
+    if (!result.changed && db.prepare('SELECT total_changes() AS count').get().count !== beforeChanges) {
+      throw new Error('No-op mutation callbacks must not write to the database.');
+    }
+    const response = result.response;
     const responseJson = JSON.stringify(response);
     if (responseJson === undefined) throw new TypeError('Mutation response must be JSON serializable.');
 
@@ -219,8 +240,16 @@ export function assertDemoDatabasePath(databasePath = demoDatabasePath) {
 export function openDemoDatabase() {
   assertDemoDatabasePath();
   const dataDirectory = dirname(demoDatabasePath);
-  if (existsSync(dataDirectory)) {
-    const directoryStat = lstatSync(dataDirectory);
+  const lstatIfPresent = (path) => {
+    try {
+      return lstatSync(path);
+    } catch (error) {
+      if (error.code === 'ENOENT') return null;
+      throw error;
+    }
+  };
+  const directoryStat = lstatIfPresent(dataDirectory);
+  if (directoryStat) {
     if (directoryStat.isSymbolicLink() || !directoryStat.isDirectory()) {
       throw new Error('The demo data directory must be a real directory.');
     }
@@ -230,7 +259,7 @@ export function openDemoDatabase() {
   if (realpathSync(dataDirectory) !== dataDirectory) {
     throw new Error('The demo data directory resolves outside this project.');
   }
-  if (existsSync(demoDatabasePath) && lstatSync(demoDatabasePath).isSymbolicLink()) {
+  if (lstatIfPresent(demoDatabasePath)?.isSymbolicLink()) {
     throw new Error('The demo database cannot be a symbolic link.');
   }
   return openDatabase(demoDatabasePath);

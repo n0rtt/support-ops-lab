@@ -24,7 +24,9 @@ Run the deterministic checks with:
 
     npm test
 
-The tests use temporary SQLite files. They cover schema/seed initialization, preservation across reinitialization and process-style reopen, transaction rollback, durable receipt replay, key/payload collisions, stale versions, reset path protection, and the read-only case API.
+The tests use temporary SQLite files. They cover schema/seed initialization, preservation across reinitialization and process-style reopen, transaction rollback, durable receipt replay, key/payload collisions, stale versions, explicit change/no-op version progression, reset path protection including dangling symlinks, and the read-only case API.
+
+Mutation callbacks return `{ changed, response }`. A change must advance the case version exactly once; a no-op must leave the version unchanged and perform no database writes. The helper rejects violations inside the transaction, so domain writes and receipts roll back together.
 
 ## Persistence and reset
 

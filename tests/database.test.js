@@ -1,7 +1,17 @@
 import assert from 'node:assert/strict';
-import { mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
+import {
+  copyFileSync,
+  existsSync,
+  mkdirSync,
+  mkdtempSync,
+  readFileSync,
+  rmSync,
+  symlinkSync,
+  writeFileSync,
+} from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
+import { pathToFileURL } from 'node:url';
 import { test } from 'node:test';
 import {
   demoDatabasePath,
@@ -70,7 +80,10 @@ test('mutation commit, rollback, receipt replay, collision, and stale versions p
         'status_changed',
         JSON.stringify({ from: 'open', to: 'in_progress' }),
       );
-    return { caseId: 'SEW-1001', status: 'in_progress', version: 2 };
+    return {
+      changed: true,
+      response: { caseId: 'SEW-1001', status: 'in_progress', version: 2 },
+    };
   };
 
   assert.throws(
@@ -120,16 +133,74 @@ test('mutation commit, rollback, receipt replay, collision, and stale versions p
     () => runIdempotentMutation(db, { ...context, payload: { status: 'resolved' } }, mutate),
     IdempotencyKeyReusedError,
   );
+  let staleCallbackRan = false;
   assert.throws(
-    () =>
-      runIdempotentMutation(
-        db,
-        { ...context, requestKey: 'request-stale' },
-        mutate,
-      ),
+    () => runIdempotentMutation(db, { ...context, requestKey: 'request-stale' }, (connection) => {
+      staleCallbackRan = true;
+      return mutate(connection);
+    }),
     StaleCaseError,
   );
+  assert.equal(staleCallbackRan, false);
   assert.equal(db.prepare('SELECT COUNT(*) AS count FROM mutation_receipts').get().count, 1);
+
+  const noOpContext = { ...context, requestKey: 'request-noop', expectedVersion: 2 };
+  assert.deepEqual(
+    runIdempotentMutation(db, noOpContext, () => ({ changed: false, response: { unchanged: true } })),
+    { replayed: false, response: { unchanged: true } },
+  );
+  assert.deepEqual(
+    runIdempotentMutation(db, noOpContext, () => {
+      throw new Error('a no-op receipt replay must not call the callback');
+    }),
+    { replayed: true, response: { unchanged: true } },
+  );
+  assert.equal(db.prepare('SELECT version FROM cases WHERE id = ?').get('SEW-1001').version, 2);
+  assert.equal(db.prepare('SELECT COUNT(*) AS count FROM activities').get().count, 4);
+  assert.equal(db.prepare('SELECT COUNT(*) AS count FROM mutation_receipts').get().count, 2);
+});
+
+test('mutation callbacks must report changes and advance the case version or roll back', (t) => {
+  const { databasePath } = temporaryDatabase(t);
+  const db = openDatabase(databasePath);
+  initializeDatabase(db);
+  t.after(() => db.close());
+
+  const context = {
+    requestKey: 'request-missing-version',
+    method: 'PATCH',
+    route: '/api/cases/SEW-1001/status',
+    payload: { status: 'in_progress' },
+    caseId: 'SEW-1001',
+    expectedVersion: 1,
+  };
+
+  assert.throws(
+    () => runIdempotentMutation(db, context, (connection) => {
+      connection.prepare('UPDATE cases SET status = ? WHERE id = ?').run('in_progress', 'SEW-1001');
+      connection
+        .prepare('INSERT INTO activities (id, case_id, created_at, activity_type, payload) VALUES (?, ?, ?, ?, ?)')
+        .run('ACT-MISSING-VERSION', 'SEW-1001', '2026-10-20T10:00:00.000Z', 'status_changed', '{}');
+      return { changed: true, response: { status: 'in_progress' } };
+    }),
+    /advance the case version exactly once/,
+  );
+  assert.deepEqual(
+    { ...db.prepare('SELECT status, version FROM cases WHERE id = ?').get('SEW-1001') },
+    { status: 'open', version: 1 },
+  );
+  assert.equal(db.prepare('SELECT COUNT(*) AS count FROM activities').get().count, 3);
+  assert.equal(db.prepare('SELECT COUNT(*) AS count FROM mutation_receipts').get().count, 0);
+
+  assert.throws(
+    () => runIdempotentMutation(db, { ...context, requestKey: 'request-writing-noop' }, (connection) => {
+      connection.prepare('UPDATE cases SET status = ? WHERE id = ?').run('in_progress', 'SEW-1001');
+      return { changed: false, response: { unchanged: true } };
+    }),
+    /No-op mutation callbacks must not write/,
+  );
+  assert.equal(db.prepare('SELECT status FROM cases WHERE id = ?').get('SEW-1001').status, 'open');
+  assert.equal(db.prepare('SELECT COUNT(*) AS count FROM mutation_receipts').get().count, 0);
 });
 
 test('reset confirmation and path guards leave unrelated files untouched', (t) => {
@@ -145,4 +216,28 @@ test('reset confirmation and path guards leave unrelated files untouched', (t) =
   );
   assert.throws(() => resetDemoDatabase(), /--confirm flag/);
   assert.equal(readFileSync(unrelatedPath, 'utf8'), 'keep this file');
+});
+
+test('demo database opening rejects a dangling symlink before SQLite can create its target', async (t) => {
+  const projectDirectory = mkdtempSync(join(tmpdir(), 'supportops-symlink-project-'));
+  t.after(() => rmSync(projectDirectory, { recursive: true, force: true }));
+  const outsideDirectory = mkdtempSync(join(tmpdir(), 'supportops-symlink-target-'));
+  t.after(() => rmSync(outsideDirectory, { recursive: true, force: true }));
+  const serverDirectory = join(projectDirectory, 'server');
+  const fixtureDirectory = join(projectDirectory, 'fixtures');
+  const dataDirectory = join(projectDirectory, 'data');
+  mkdirSync(serverDirectory);
+  mkdirSync(fixtureDirectory);
+  mkdirSync(dataDirectory);
+  writeFileSync(join(projectDirectory, 'package.json'), '{"type":"module"}\n');
+  copyFileSync(new URL('../server/database.js', import.meta.url), join(serverDirectory, 'database.js'));
+  copyFileSync(new URL('../fixtures/cases.js', import.meta.url), join(fixtureDirectory, 'cases.js'));
+
+  const targetPath = join(outsideDirectory, 'supportops.sqlite');
+  const databasePath = join(dataDirectory, 'supportops.sqlite');
+  symlinkSync(targetPath, databasePath);
+  const isolatedDatabase = await import(pathToFileURL(join(serverDirectory, 'database.js')).href);
+
+  assert.throws(() => isolatedDatabase.openDemoDatabase(), /cannot be a symbolic link/);
+  assert.equal(existsSync(targetPath), false);
 });
