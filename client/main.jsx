@@ -422,6 +422,7 @@ function App() {
   const savedOutcome = activeCase?.activities
     .filter((activity) => activity.type === 'status_changed' && activity.payload.to === 'resolved')
     .at(-1)?.payload.outcome;
+  const retainedEscalationDraft = activeCase?.status === 'resolved' && selectedDraft.transitionTarget === 'escalated';
   const retainedOutcomeDraft = selectedDraft.resolutionOutcome &&
     selectedDraft.resolutionOutcome !== requestedOutcome &&
     selectedDraft.resolutionOutcome !== savedOutcome;
@@ -583,6 +584,19 @@ function App() {
                   {activeCase.status === 'resolved' ? (
                     <>
                       <p className="terminal-note">Resolved is terminal. Internal notes and simulated replies can still be recorded without changing the resolution.</p>
+                      {retainedEscalationDraft && (
+                        <div className="status-form">
+                          <div className="status-fields">
+                            <p className="field-hint">This escalation draft was not applied. The resolved case cannot accept another status change; review or copy the draft below.</p>
+                            <label htmlFor="retained-escalation-reason">Unsaved escalation reason</label>
+                            <textarea id="retained-escalation-reason" maxLength={10000} value={selectedDraft.escalationReason || ''} onChange={(event) => updateDraft(activeCase.id, 'escalationReason', event.target.value)} />
+                            <label htmlFor="retained-escalation-findings">Unsaved escalation findings</label>
+                            <textarea id="retained-escalation-findings" maxLength={10000} value={selectedDraft.escalationFindings || ''} onChange={(event) => updateDraft(activeCase.id, 'escalationFindings', event.target.value)} />
+                            <label htmlFor="retained-outstanding-questions">Unsaved outstanding questions</label>
+                            <textarea id="retained-outstanding-questions" maxLength={10000} value={selectedDraft.outstandingQuestions || ''} onChange={(event) => updateDraft(activeCase.id, 'outstandingQuestions', event.target.value)} />
+                          </div>
+                        </div>
+                      )}
                       {retainedOutcomeDraft && (
                         <div className="status-form">
                           <div className="status-fields">

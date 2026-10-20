@@ -1,4 +1,9 @@
+import { mkdtempSync, rmSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
 import { expect, test } from '@playwright/test';
+import { createApp } from '../server/app.js';
+import { initializeDatabase, openDatabase } from '../server/database.js';
 
 async function holdCommittedResponse(page, matcher) {
   let release;
@@ -275,6 +280,62 @@ test('an uncertain resolution remains confirmable after reload on a resolved cas
     .toBe('Engineering confirmed the reported issue is resolved.');
   expect(await page.evaluate(() => JSON.parse(sessionStorage.getItem('supportops.pending-actions.v1') || '{}')['SEW-1003:status']))
     .toBeUndefined();
+});
+
+test('a conflict that reveals a resolved case keeps an escalation draft available after reload', async ({ browser }) => {
+  const directory = mkdtempSync(join(tmpdir(), 'supportops-conflict-'));
+  const db = openDatabase(join(directory, 'supportops.sqlite'));
+  initializeDatabase(db);
+  const server = createApp({ db }).listen(0, '127.0.0.1');
+  let context;
+  try {
+    await new Promise((resolve, reject) => {
+      server.once('listening', resolve);
+      server.once('error', reject);
+    });
+    const baseUrl = 'http://127.0.0.1:' + server.address().port;
+    context = await browser.newContext();
+    const page = await context.newPage();
+    await page.goto(baseUrl + '/#SEW-1003');
+    await page.getByLabel('Move case to').selectOption('escalated');
+    await page.getByLabel('Escalation reason').fill('Escalation draft from the first operator.');
+    await page.getByLabel('Current findings').fill('The report still has no request ID or occurrence time.');
+    await page.getByLabel('Outstanding questions').fill('Which request path and time window are affected?');
+
+    const otherOperator = await context.newPage();
+    await otherOperator.goto(baseUrl + '/#SEW-1003');
+    await otherOperator.getByLabel('Move case to').selectOption('escalated');
+    await otherOperator.getByLabel('Escalation reason').fill('The second operator escalated for engineering review.');
+    await otherOperator.getByLabel('Current findings').fill('No matching diagnostics are available.');
+    await otherOperator.getByLabel('Outstanding questions').fill('Can engineering identify the affected request path?');
+    await otherOperator.getByRole('button', { name: 'Save status and history' }).click();
+    await expect(otherOperator.locator('.case-detail .status-escalated')).toBeVisible();
+    await otherOperator.getByLabel('Move case to').selectOption('resolved');
+    await otherOperator.getByLabel('Resolution outcome').fill('The second operator completed the case investigation.');
+    await otherOperator.getByRole('button', { name: 'Save status and history' }).click();
+    await expect(otherOperator.locator('.case-detail .status-resolved')).toBeVisible();
+
+    await page.getByRole('button', { name: 'Save status and history' }).click();
+    await expect(page.getByRole('button', { name: 'Reload case and review draft' })).toBeVisible();
+    await page.getByRole('button', { name: 'Reload case and review draft' }).click();
+    await expect(page.locator('.case-detail .status-resolved')).toBeVisible();
+    await expect(page.getByLabel('Unsaved escalation reason')).toHaveValue('Escalation draft from the first operator.');
+    await expect(page.getByLabel('Unsaved escalation findings')).toHaveValue('The report still has no request ID or occurrence time.');
+    await expect(page.getByLabel('Unsaved outstanding questions')).toHaveValue('Which request path and time window are affected?');
+    await expect(page.getByText('This escalation draft was not applied. The resolved case cannot accept another status change; review or copy the draft below.')).toBeVisible();
+
+    await page.reload();
+    await expect(page.locator('.case-detail .status-resolved')).toBeVisible();
+    await expect(page.getByLabel('Unsaved escalation reason')).toHaveValue('Escalation draft from the first operator.');
+    await expect(page.getByLabel('Unsaved escalation findings')).toHaveValue('The report still has no request ID or occurrence time.');
+    await expect(page.getByLabel('Unsaved outstanding questions')).toHaveValue('Which request path and time window are affected?');
+    await otherOperator.close();
+  } finally {
+    await context?.close();
+    if (server.listening) await new Promise((resolve) => server.close(resolve));
+    db.close();
+    rmSync(directory, { recursive: true, force: true });
+  }
 });
 
 test('interrupted saves retry with the same key and stale conflicts require explicit reconciliation', async ({ page }) => {
