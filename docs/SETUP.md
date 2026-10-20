@@ -26,7 +26,7 @@ Simulated replies are labeled **“Simulated reply to customer — not sent.”*
 
 SQLite stores cases, append-only activities, and mutation receipts. M2 applies numbered migrations through schema version 3: the activity sequence is backfilled in timestamp and prior insertion order, then new activities receive a per-case append sequence. The migrations preserve all existing rows and keep the same three domain tables. Case state, activity, version, and idempotency receipt commit in one transaction. Repeating the same key and payload replays its response; reusing a key for changed content or submitting against a stale case version returns a conflict.
 
-Each browser tab saves its case drafts and exact pending requests in session storage, so reloads retain them without tabs overwriting one another. An interrupted request can be retried with the same key. A conflict never resubmits automatically; reload the current case, review the saved draft, then decide what to submit.
+Each browser tab saves its case drafts and exact pending requests in session storage, so reloads retain them without tabs overwriting one another. A newer outcome draft that remains after resolution is visible on the terminal case; it was not applied and can be reviewed or copied. An interrupted request can be retried with the same key. A conflict never resubmits automatically; reload the current case, review the saved draft, then decide what to submit.
 
 To check persistence manually, stop the server, run **npm run db:init**, and start the server again. Case state and history remain in the database. To restore the initial fictional cases, stop the server first and then run:
 

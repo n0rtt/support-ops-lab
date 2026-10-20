@@ -543,7 +543,24 @@ function App() {
                 <section className="status-section" aria-labelledby="status-title">
                   <h3 id="status-title">Case status</h3>
                   {activeCase.status === 'resolved' ? (
-                    <p className="terminal-note">Resolved is terminal. Internal notes and simulated replies can still be recorded without changing the resolution.</p>
+                    <>
+                      <p className="terminal-note">Resolved is terminal. Internal notes and simulated replies can still be recorded without changing the resolution.</p>
+                      {selectedDraft.resolutionOutcome && (
+                        <div className="status-form">
+                          <div className="status-fields">
+                            <label htmlFor="retained-resolution-outcome">Unsaved resolution outcome draft</label>
+                            <textarea
+                              id="retained-resolution-outcome"
+                              aria-describedby="retained-resolution-outcome-help"
+                              maxLength={10000}
+                              value={selectedDraft.resolutionOutcome}
+                              onChange={(event) => updateDraft(activeCase.id, 'resolutionOutcome', event.target.value)}
+                            />
+                            <p className="field-hint" id="retained-resolution-outcome-help">This draft was not saved as the resolution outcome. Resolved is terminal; review or copy it before clearing it.</p>
+                          </div>
+                        </div>
+                      )}
+                    </>
                   ) : (
                     <form className="status-form" onSubmit={submitStatus}>
                       <label htmlFor="transition-target">Move case to</label>

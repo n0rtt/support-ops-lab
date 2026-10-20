@@ -134,8 +134,11 @@ test('newer note, reply, and outcome drafts survive earlier acknowledgments and 
   await expect(page.getByText('Resolution outcome: Submitted resolution outcome.')).toBeVisible();
   await expect(note).toHaveValue('Newer note draft must remain.');
   await expect(reply).toHaveValue('Newer reply draft must remain.');
-  await expect.poll(() => page.evaluate(() => JSON.parse(sessionStorage.getItem('supportops.case-drafts.v1'))['SEW-1002'].resolutionOutcome))
-    .toBe('Newer outcome draft must remain.');
+  const retainedOutcome = page.getByLabel('Unsaved resolution outcome draft');
+  await expect(retainedOutcome).toHaveValue('Newer outcome draft must remain.');
+  await retainedOutcome.fill('Edited retained outcome draft.');
+  await page.reload();
+  await expect(page.getByLabel('Unsaved resolution outcome draft')).toHaveValue('Edited retained outcome draft.');
 });
 
 test('separate tabs retain independent case drafts through reload', async ({ page, context }) => {
