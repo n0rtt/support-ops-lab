@@ -46,6 +46,9 @@ export function createOpenAIAnalyzer({
       if (response.status === 'incomplete') {
         return { ...metadata, status: 'incomplete', failureCode: 'provider_incomplete' };
       }
+      if (response.status !== 'completed') {
+        return { ...metadata, status: 'failed', failureCode: 'provider_unavailable' };
+      }
       if (response.output?.some((item) => item.type === 'message' && item.content?.some((content) => content.type === 'refusal'))) {
         return { ...metadata, status: 'refused', failureCode: 'provider_refusal' };
       }
