@@ -84,20 +84,28 @@ test('manual resolution preserves history, simulated labeling, selection, and ca
 
 test('a late save refresh respects the current status filter', async ({ page }) => {
   await page.goto('/#SEW-1001');
-  const hold = await holdCommittedResponse(page, '**/api/cases/SEW-1001/activities');
+  const save = await holdCommittedResponse(page, '**/api/cases/SEW-1001/activities');
   await page.getByLabel('Visible to support operators only').fill('This note must not replace the active queue filter.');
   await page.getByRole('button', { name: 'Add internal note' }).click();
-  await hold.requestCommitted;
+  await save.requestCommitted;
 
-  await page.getByLabel('Filter cases by status').selectOption('resolved');
-  const cards = page.locator('.case-card .status');
-  await expect(cards).toHaveText(['Resolved']);
-  hold.release();
-  await hold.responseFulfilled;
-
+  const filter = await holdCommittedResponse(
+    page,
+    (url) => url.pathname === '/api/cases' && url.searchParams.get('status') === 'in_progress',
+  );
+  await page.getByLabel('Filter cases by status').selectOption('in_progress');
+  await filter.requestCommitted;
+  save.release();
+  await save.responseFulfilled;
   await expect(page.getByText('Saved.', { exact: true })).toBeVisible();
-  await expect(page.getByLabel('Filter cases by status')).toHaveValue('resolved');
-  await expect(cards).toHaveText(['Resolved']);
+  await expect(page.getByText('Loading synthetic cases…')).toHaveCount(0);
+  const cards = page.locator('.case-card .status');
+  await expect(cards).toHaveText(['In progress']);
+  filter.release();
+  await filter.responseFulfilled;
+
+  await expect(page.getByLabel('Filter cases by status')).toHaveValue('in_progress');
+  await expect(cards).toHaveText(['In progress']);
 });
 
 test('a late acknowledgment cannot replace the selected case or redirect its next action', async ({ page }) => {
@@ -227,6 +235,14 @@ test('insufficient-information case can be escalated with an empty evidence list
 
 test('an uncertain resolution remains confirmable after reload on a resolved case', async ({ page }) => {
   await page.goto('/#SEW-1003');
+  if (!(await page.locator('.case-detail .status-escalated').count())) {
+    await page.getByLabel('Move case to').selectOption('escalated');
+    await page.getByLabel('Escalation reason').fill('Engineering must investigate a reproducible upstream issue.');
+    await page.getByLabel('Current findings').fill('The issue persists without request identifiers or linked diagnostics.');
+    await page.getByLabel('Outstanding questions').fill('Can engineering identify the affected request path?');
+    await page.getByRole('button', { name: 'Save status and history' }).click();
+    await expect(page.locator('.case-detail .status-escalated')).toBeVisible();
+  }
   await expect(page.locator('.case-detail .status-escalated')).toBeVisible();
   await page.route('**/api/cases/SEW-1003/status', async (route) => {
     const response = await route.fetch();

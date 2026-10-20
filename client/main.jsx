@@ -230,8 +230,12 @@ function App() {
       if (request !== queueRequestRef.current || statusFilterRef.current !== filter) return;
       setCases(loadedCases);
       setQueueError('');
+      setLoadState('ready');
     } catch (error) {
-      if (request === queueRequestRef.current && statusFilterRef.current === filter) throw error;
+      if (request === queueRequestRef.current && statusFilterRef.current === filter) {
+        setLoadState('error');
+        throw error;
+      }
     }
   }
 
