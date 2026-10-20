@@ -262,10 +262,14 @@ test('M5 C preserves uncertainty, records a specific information request, and es
   });
 });
 
-test('M5 narrow layout keeps keyboard focus, labels, and save feedback usable', async ({ browser }) => {
+test('M5 zoom-equivalent narrow layouts keep keyboard focus, labels, and save feedback usable', async ({ browser }) => {
   await withFreshApp(browser, async (page, baseUrl) => {
-    await page.setViewportSize({ width: 360, height: 800 });
+    await page.setViewportSize({ width: 1440, height: 900 });
     await page.goto(baseUrl + '/#SEW-1001');
+    expect(await page.evaluate(() => document.documentElement.scrollWidth <= window.innerWidth)).toBe(true);
+    await page.setViewportSize({ width: 720, height: 900 });
+    expect(await page.evaluate(() => document.documentElement.scrollWidth <= window.innerWidth)).toBe(true);
+    await page.setViewportSize({ width: 360, height: 800 });
     expect(await page.evaluate(() => document.documentElement.scrollWidth <= window.innerWidth)).toBe(true);
     await expect(page.getByLabel('Visible to support operators only')).toBeVisible();
     await expect(page.getByLabel(replyLabel)).toBeVisible();
