@@ -385,7 +385,7 @@ test('newer note, reply, and outcome drafts survive earlier acknowledgments and 
   await hold.requestCommitted;
   await reply.fill('Newer reply draft must remain.');
   hold.release();
-  await expect(page.getByText('Saved.', { exact: true })).toBeVisible();
+  await expect(page.locator('.reply-card .save-feedback')).toHaveText('Saved.');
   await expect(reply).toHaveValue('Newer reply draft must remain.');
   await page.unroute('**/api/cases/SEW-1002/activities');
 
@@ -393,6 +393,7 @@ test('newer note, reply, and outcome drafts survive earlier acknowledgments and 
   hold = await holdCommittedResponse(page, statusMatcher);
   await page.getByLabel('Move case to').selectOption('resolved');
   await page.getByLabel('Resolution outcome').fill('Submitted resolution outcome.');
+  await expect(page.getByRole('button', { name: 'Save status and history' })).toBeEnabled();
   await page.getByRole('button', { name: 'Save status and history' }).click();
   await hold.requestCommitted;
   await page.getByLabel('Resolution outcome').fill('Newer outcome draft must remain.');
