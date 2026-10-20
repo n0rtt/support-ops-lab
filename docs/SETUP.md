@@ -71,4 +71,4 @@ The browser suite uses a temporary SQLite database and does not touch the local 
 
 ## Milestone status
 
-The M3 implementation is on an isolated branch based on approved M2 integration SHA `f5de45fcfc8a73aeee4acf62f1888836cce40233`. The two minor UI findings reported for PR head `b49707ce7531b557c63fc67a5542236a84c7d72f` are fixed in this branch; independent technical re-review, Product Owner acceptance, merge authorization, and integrated CI are pending. M4 analysis and review workflows remain future work. No external messaging, delivery replay, event ingestion, authentication, or deployment feature is included.
+The M3 implementation is on an isolated branch based on approved M2 integration SHA `f5de45fcfc8a73aeee4acf62f1888836cce40233`. Independent technical review approved implementation SHA `65a2857d2bee03581bb185e2e74038c6845c195a`; Product Owner acceptance, merge authorization, and integrated CI are pending. M4 analysis and review workflows remain future work. No external messaging, delivery replay, event ingestion, authentication, or deployment feature is included.
