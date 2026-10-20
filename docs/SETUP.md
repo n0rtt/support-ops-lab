@@ -1,93 +1,85 @@
-# Local setup and investigation demo
+# Local setup and demo data
 
 ## Requirements
 
-- Node.js **24.15.0** and npm from that installation.
-- Chromium for `npm run test:e2e` (`npx playwright install chromium`). GitHub Actions installs Chromium and its Linux dependencies automatically.
+- Node.js **24.15.0** and npm from that installation (`.nvmrc` pins the Node version).
+- Chromium for browser journeys (`npx playwright install chromium`).
 
-Node 24.15.0 marks `node:sqlite` as a release candidate. The automated checks use file-backed SQLite migrations and persistence. See the [Node 24.15.0 SQLite documentation](https://nodejs.org/download/release/v24.15.0/docs/api/sqlite.html).
+Node 24.15.0 documents `node:sqlite` as a release candidate. The project uses file-backed SQLite; see the [versioned Node documentation](https://nodejs.org/download/release/v24.15.0/docs/api/sqlite.html).
 
-## Install and run
+## Install and run without AI credentials
 
 From the repository root:
 
-    nvm install
-    nvm use
-    npm ci
-    npm run db:init
-    npm run build
-    npm start
+```sh
+nvm install
+nvm use
+npm ci
+npm run db:init
+npm run build
+npm start
+```
 
-Open <http://127.0.0.1:3000>. The queue contains three fictional cases. Review the case history, record internal notes, record clearly labeled simulated replies, and update status. Each case also includes diagnostic search, linked evidence, and read-only technical guidance. No message leaves the app, diagnostics cannot trigger deliveries, and no AI credentials are needed.
+Open <http://127.0.0.1:3000>. The server binds to loopback. No API key is required for manual case work, diagnostics, fixtures, or review.
 
-M4 adds offline evaluation and human review without requiring credentials. Scenario A includes an explicitly labeled intentionally incorrect outage fixture; it is synthetic evaluation data, not an observed model result. Reject it with the authentication correction, then load another analysis to inspect that feedback in its saved context. Scenario B's fixture requires all three subscription webhook attempts to be linked to the case. Scenario C is available only while the case has no linked diagnostic records. Fixtures never claim a provider, model, response ID, or live execution.
+Live model inference is unavailable without a server-side key; the interface says so and keeps the rest of the workbench available. Offline fixtures do not make provider requests and do not include invented provider, model, or response metadata.
 
-Each analysis saves the exact case, activity, linked evidence, knowledge entries, and prior rejection feedback supplied to it, together with the IDs it was allowed to cite. Later case changes do not alter that snapshot. The app checks structured references against this saved allowlist; a valid citation confirms only that the record was supplied, not that the interpretation is true. Unsupported references stay visible and block approval and draft reuse, while rejection remains available.
+## Optional live analysis
 
-Accepting or editing a recommendation appends a review and preserves the original analysis. To use an approved response, choose **Use reviewed draft**; it fills the existing composer only after you choose whether to replace unsent text. It does not record or send a reply. **Record simulated reply** remains a separate action, and case status changes remain separate as well. Rejecting a recommendation records corrective feedback; a later analysis captures that feedback in its own snapshot. Review history is append-only.
+Live analysis uses the server-side OpenAI Responses API with Structured Outputs. Configure the server environment before starting it:
 
-### Optional live analysis
+```sh
+export OPENAI_API_KEY="your-key"
+export OPENAI_MODEL="gpt-6.1-sol"  # optional; this is the default
+npm start
+```
 
-Live inference is optional and uses the server-side OpenAI Responses API with Structured Outputs. To enable it, set the credential in the server process environment before starting the app:
+Keep credentials outside source files, browser settings, client assets, and logs. The model setting is server-side and has no automatic fallback. Requests use the saved case context, `store: false`, no tools, disabled SDK retries, and a bounded timeout. Do not use a live key to run the deterministic test suite; CI makes no paid request.
 
-    export OPENAI_API_KEY="your-key"
-    export OPENAI_MODEL="gpt-6.1-sol"  # optional; this is the default
-    npm start
-
-Keep the key out of source files, browser settings, client bundles, and logs. `OPENAI_MODEL` is configurable; the server does not silently switch models. The integration sends the saved context with `store: false`, no tools, SDK retries disabled, and a bounded timeout. The local SDK transport tests use a mocked HTTP response and do not constitute real model verification. A real request requires an authorized API account with access to the configured model. With no key, manual, diagnostic, fixture, and review workflows continue to work.
+M4 genuine inference was separately accepted by the Product Owner for synthetic case `SEW-1003`, requested/returned model `gpt-6.1-sol`, analysis `AN-ea755d67-414c-4ac5-86eb-cb5116ea1c71`. M5 makes no new paid request. See the [engineering history](ENGINEERING_HISTORY.md) for the accepted record and limits.
 
 ## Synthetic investigation records
 
-Search accepts one exact, case-sensitive row ID, request ID, or event ID. Surrounding whitespace is trimmed. Search results are global, so inspect the organization before selecting rows to associate. The app displays every webhook attempt in the matching organization/event history; reading a history does not associate any row.
+Search accepts one exact, case-sensitive row ID, request ID, or event ID after trimming surrounding whitespace. Results are global; inspect organization ownership before association. Reading a history does not associate any rows.
 
-| Scenario | Case | Stable search IDs | Expected evidence |
+| Scenario | Case and organization | Exact search IDs | Starting evidence |
 | --- | --- | --- | --- |
-| A — authentication | `SEW-1001` / `ORG-ALDER-01` | `req_auth_20261019_001`, `req_auth_20261019_002`, `req_auth_20261019_003`; rows `DIAG-AUTH-401-001` through `DIAG-AUTH-401-003` | Three linked HTTP 401 API observations. Inspect `KB-AUTH-01`; repeated 401 responses alone do not establish a provider outage. |
-| B — subscription webhook | `SEW-1002` / `ORG-CEDAR-02` | Event `evt_subscription_480`; rows `DIAG-WH-SUB-001`, `DIAG-WH-SUB-002`, `DIAG-WH-SUB-003` | Initially unlinked attempts: HTTP 500, timeout with no HTTP response, then HTTP 204 acknowledgment. The acknowledgment does not establish downstream processing. |
-| B — invoice webhook | `SEW-1002` / `ORG-CEDAR-02` | Event `evt_invoice_731`; rows `DIAG-WH-INV-001`, `DIAG-WH-INV-002` | Initially unlinked attempts: HTTP 503, then a pending retry with no observed delivery time or response. |
+| A — authentication | `SEW-1001` / `ORG-ALDER-01` | `req_auth_20261019_001`, `req_auth_20261019_002`, `req_auth_20261019_003`; rows `DIAG-AUTH-401-001`–`DIAG-AUTH-401-003` | Three linked HTTP 401 observations. Inspect `KB-AUTH-01`; they support an authentication investigation and do not establish a provider outage. |
+| B — subscription webhook | `SEW-1002` / `ORG-CEDAR-02` | Event `evt_subscription_480`; rows `DIAG-WH-SUB-001`–`DIAG-WH-SUB-003` | Initially unlinked attempts: HTTP 500, timeout with no HTTP response, then HTTP 204 endpoint acknowledgment. Downstream processing is unobserved. |
+| B — invoice webhook | `SEW-1002` / `ORG-CEDAR-02` | Event `evt_invoice_731`; rows `DIAG-WH-INV-001`–`DIAG-WH-INV-002` | Initially unlinked attempts: HTTP 503, then a pending retry with no observed time or response. |
+| Same ID, other organization | No case / `ORG-MAPLE-99` | Row `DIAG-OTHER-001`; event ID `evt_subscription_480` | Global lookup also returns Maple's separate history. Its row cannot be linked to Cedar's case. |
+| C — insufficient evidence | `SEW-1003` | `req_missing_case_c_20261020` | No diagnostic is seeded for this ID. An empty search is missing evidence; it does not establish a failure or outage. |
 
-| Unrelated organization | No case | Row `DIAG-OTHER-001`; event ID `evt_subscription_480` | Global search also returns `ORG-MAPLE-99`. Its history stays separate from Cedar’s same-ID event, and its row cannot be linked to another organization’s case. |
-| C — missing evidence | `SEW-1003` | For a reproducible no-result check, search `req_missing_case_c_20261020` | No diagnostic is seeded for this case. The empty result does not imply that a failure or outage occurred. Ask for an exact request ID and UTC window, or escalate with no evidence. |
+The Scenario B fixture remains unavailable until **all five** Cedar subscription and invoice attempt rows have been explicitly associated with `SEW-1002`. The fixture then discusses HTTP 500, timeout, HTTP 204 acknowledgment, HTTP 503, and pending retry while leaving downstream processing unknown.
 
-Fixture B is available only after an operator explicitly links all five subscription and invoice attempts. It discusses the HTTP 500, timeout, HTTP 204 acknowledgment, HTTP 503, and pending retry while keeping downstream processing unknown.
+The four fixed knowledge entries are `KB-AUTH-01`, `KB-WEBHOOK-01`, `KB-REQUEST-01`, and `KB-OUTAGE-01`. They are fictional versioned text, not generated guidance or a retrieval service.
 
-The four inspectable knowledge entries are `KB-AUTH-01`, `KB-WEBHOOK-01`, `KB-REQUEST-01`, and `KB-OUTAGE-01`. They are fictional, versioned plain text; there is no retrieval service or generated guidance.
+## Analysis and review behavior
 
-### Observed outcomes
+Each saved analysis includes the exact case, activity, linked evidence, knowledge entries, and prior rejection feedback supplied to it, plus the IDs it may cite. Later changes do not alter that snapshot. A structured reference is checked against that saved allowlist; membership confirms that a source was supplied, not that a claim is true. Unsupported references remain visible and block approval and reviewed-draft reuse. Rejection remains available.
 
-- A 2xx response is shown as **“Acknowledged by endpoint; downstream processing not observed.”**
-- A timeout is shown as **“No HTTP response observed.”**
-- A pending retry is shown as **“Pending retry; no observed delivery time or response.”**
+The A outage conclusion is an intentionally incorrect evaluation fixture. Rejecting it records correction history. A later fixture snapshot contains that feedback, while the repeated fixture keeps its original output. This is not model learning or a corrected model answer.
 
-Unknown response and timestamp values remain unknown. Diagnostic rows and knowledge entries are read-only. Escalation records the selected already-linked diagnostic IDs as a historical snapshot; later associations do not alter earlier escalation history. Empty-evidence escalation remains available.
+Accepting or editing appends a human review and preserves the original output. **Use reviewed draft** copies an approved draft into the composer only. **Record simulated reply** is a separate explicit action. Neither review nor draft reuse sends a message or changes case status.
 
-## Durable data, initialization, and reset
+## Reset and persistence
 
-SQLite schema version 5 adds exactly `analyses` and `reviews` to the M1–M3 tables. Migration 5 preserves case data, activities and their sequence numbers, evidence associations, diagnostic and knowledge fixtures, and mutation receipts. Analyses persist their source, saved context and reference allowlist, lifecycle status, structured recommendation, validation, and available live-provider metadata. Reviews are append-only. Live requests are reserved transactionally before inference; inference happens outside the transaction. A process restart marks any still-running live analysis as interrupted instead of resending it. Only one live analysis can be running for a case at a time. Offline fixtures do not claim provider execution metadata.
+The recognized demo database is `data/supportops.sqlite` under this project. Stop the server before reset. The reset clears local cases, activities, links, diagnostics, knowledge entries, analyses, reviews, and mutation receipts, then restores the synthetic baseline:
 
-Case updates and association writes use expected versions and idempotency receipts. Repeating the same key and payload replays its committed response, including after restart. Reusing a key with different content or submitting a new request against a stale case version returns a conflict. Evidence batches are validated together; unknown or wrong-organization records produce no partial changes. Duplicate links are deduplicated, and an all-already-linked request is a no-op.
+```sh
+npm run demo:reset -- --confirm
+```
 
-Each browser tab retains case-scoped drafts, selected diagnostic IDs, and exact pending requests in session storage. Association retries reuse the original key and payload after an uncertain connection. Conflicts require explicit reload and review; drafts and evidence selections remain available.
+Reset requires the confirmation flag and refuses custom database paths, symlinked data directories, and symlinked database files. It permanently removes local demo changes in the recognized database. Browser tests use separate temporary databases.
 
-To check persistence manually, stop the server, run **npm run db:init**, and start it again. Case state and history remain in the database. To restore the complete initial synthetic baseline, stop the server and run:
+Normal server stop/start does not reset the database. M5's restart check uses `npm start` against the same disposable file without invoking reset; see [M5 verification](M5_VERIFICATION.md).
 
-    npm run demo:reset -- --confirm
+## Verification commands
 
-Reset clears cases, activities, associations, technical fixtures, knowledge entries, analyses, reviews, and mutation receipts in this project’s recognized demo database, then restores the initial reports, A’s seed links, unlinked B events, and four knowledge entries. It refuses to run without confirmation or against a custom database path. Do not reset if you need local demo changes.
+```sh
+npm test
+npm run test:e2e
+npm run build
+```
 
-## Verification
-
-Run database, migration, and HTTP checks with:
-
-    npm test
-
-Build and run the Chromium journeys with:
-
-    npx playwright install chromium
-    npm run test:e2e
-
-The browser suite uses a temporary SQLite database and does not touch the local demo database. It covers A’s incorrect offline fixture, authentication correction, and reanalysis context; B’s evidence prerequisites, edited approval, unsent-draft preservation, and separate simulated-reply action; C’s uncertainty-first acceptance and draft reuse; and the existing M1–M3 manual, diagnostic, evidence-association, conflict, persistence, and history workflows. Database and API tests also cover atomic reservations and reviews, idempotency, saved-context isolation, supplied-reference validation, interruption recovery, late-result fencing, provider failure/refusal/incomplete/timeout handling, and safe SDK transport behavior. CI makes no paid API request. Passing local transport tests do not verify live model behavior.
-
-## Milestone status
-
-This branch implements the Product Owner-authorized M4 handoff from approved M3 integration SHA `02c22bb11e5e2e2ae177507f26c16e5275b6eee2`. M4 adds saved-context AI analysis, three offline evaluation fixtures, append-only human review, and explicit draft reuse. Review does not send messages or change case status. No agent framework, tool calling, external messaging, delivery replay, event ingestion, production authentication, or deployment feature is included. M4 acceptance and merge remain separate decisions.
+`npm run test:e2e` builds the production client and runs Chromium workflows. Each M5 A/B/C browser journey creates a fresh synthetic SQLite database and browser context. CI uses fixtures and deterministic provider doubles; it never requires an API key or paid inference. The [human acceptance guide](ACCEPTANCE.md) describes the corresponding manual steps and expected saved records.

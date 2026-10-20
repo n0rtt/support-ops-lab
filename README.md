@@ -1,30 +1,52 @@
 # Support Engineering Workbench
 
-**Status: This branch implements Product Owner-authorized M4 from approved M3 integration SHA `02c22bb11e5e2e2ae177507f26c16e5275b6eee2`. M4 acceptance and merge remain pending.**
+Support Engineering Workbench is a local-first investigation workspace for **Technical Support Engineers handling SaaS API integrations**. It brings fictional case reports, read-only HTTP and webhook diagnostics, knowledge guidance, optional AI recommendations, and human decisions into one traceable workflow.
 
-This public portfolio project is a local-first workbench for fictional API integration support cases. M1 provides the working foundation and synthetic reports. M2 adds the manual support workflow. M3 adds exact diagnostic lookup, explicit evidence association, event-attempt inspection, and four read-only knowledge entries. M4 adds optional server-side AI analysis, offline evaluation fixtures, saved-context reference validation, and append-only human review. Existing manual and diagnostic workflows and the fixtures work without an API key.
+The principal demonstration starts with three `401 Unauthorized` observations and an explicitly labeled synthetic AI fixture that incorrectly calls them a provider outage. The operator compares the fixture with the supplied authentication guidance, rejects it with a correction, inspects that feedback in a later saved context, and edits a grounded authentication response. The original fixture stays unchanged. Repeating it does not teach the fixture or produce a corrected model answer.
 
-## Manual investigation walkthrough
+![Scenario A: the fictional API case, supplied authentication evidence, and preserved human correction.](docs/images/m5-scenario-a-human-correction.png)
 
-1. Open a case and review its report, activity history, organization, and current status.
-2. In case A (`SEW-1001`), inspect the three linked synthetic HTTP 401 records and the authentication guidance in `KB-AUTH-01`. These observations support an authentication investigation; they do not establish a provider-wide outage.
-3. In case B (`SEW-1002`), search exact event IDs such as `evt_subscription_480` or `evt_invoice_731`. Inspect the complete attempts, select only records belonging to `ORG-CEDAR-02`, associate them explicitly, and include already-associated rows in an escalation when useful.
-4. In case C (`SEW-1003`), search for a request identifier. An empty result is shown as missing evidence, not as a fabricated failure. Ask for identifiers or escalate with an empty evidence list.
-5. Load an offline AI evaluation, inspect the saved context and supplied-reference checks, then accept, edit, or reject the recommendation. Scenario A intentionally contains an incorrect outage conclusion despite citing supplied 401 evidence; it is a synthetic evaluation fixture, not an observed OpenAI model failure. Record the authentication correction and reanalyze to see the feedback in the new snapshot.
-6. An approved draft can be placed in the reply composer with **Use reviewed draft**. This preserves existing unsent text unless you choose to replace it. **Record simulated reply** remains separate and creates an activity only after explicit action; review does not send a message or change case status.
+## Run locally without an API key
 
-Diagnostic lookup is global and case-sensitive after trimming surrounding whitespace. Identical event IDs from different organizations remain separate histories, and association is restricted to the case’s organization. A 2xx response means the endpoint acknowledged the HTTP request; downstream processing is not observed. Timeout and pending rows keep missing response and timestamp values unknown.
+Requires Node.js **24.15.0**. From the repository root:
 
-All communications remain simulated. Diagnostics are read-only; the workbench does not send, replay, or mutate external requests. See [local setup and demo identifiers](docs/SETUP.md) for commands and the complete fixture map.
+```sh
+nvm install
+nvm use
+npm ci
+npm run db:init
+npm run build
+npm start
+```
 
-## Project documents
+Open <http://127.0.0.1:3000>. The queue, case history, diagnostic lookup, evidence association, offline evaluation fixtures, reviews, simulated replies, escalation, and resolution all work without credentials.
 
-- [Approved Product Brief v1.0](docs/PRODUCT_BRIEF.md)
+## What the demo can and cannot do
+
+- Cases, organizations, diagnostics, knowledge entries, and offline evaluation outputs are fictional. Fixture labels distinguish them from live model responses.
+- Customer replies are recorded as simulated activities. Nothing is sent to a customer or external service.
+- Diagnostics are read-only. The application cannot replay deliveries or change customer systems.
+- A 2xx response means the endpoint acknowledged that HTTP request. Downstream processing remains unknown. Timeouts and pending retries retain unknown response and timing values.
+- Genuine OpenAI inference is optional. Set `OPENAI_API_KEY` in the **server process** and optionally choose `OPENAI_MODEL`; no key is needed for the core workflow. The app never silently substitutes a model.
+- Human review is explicit and append-only. Accepting or editing a recommendation does not record a reply or change case status. An approved draft must be explicitly reused, then separately recorded as a simulated reply.
+
+## Try the other investigations
+
+The [human acceptance guide](docs/ACCEPTANCE.md) walks through all three scenarios, including the exact five Cedar webhook attempts and the empty-evidence escalation. [Local setup](docs/SETUP.md) has the fixture IDs, optional live-AI setup, test commands, and guarded reset procedure.
+
+## Engineering Approach
+
+Each milestone follows **Product Owner → Technical Orchestrator → Executor → Independent Technical Reviewer → Product Acceptance → Authorized Merge → Integrated CI**. Implementations use isolated worktrees and bounded milestone handoffs; technical review, Product Owner acceptance, merge authorization, and CI are recorded as separate events.
+
+The [engineering history](docs/ENGINEERING_HISTORY.md) links PRs #1–#4, their review reports, exact integration commits, and actual PR and integrated-main CI runs. The independent AI-agent reports were published through the repository owner's GitHub account. GitHub has no formal review submissions for those PRs, so the reports are not presented as GitHub-verified reviewer identities.
+
+M5 is open for a different independent technical review. Product Owner acceptance, merge, deployment, and MVP completion have not been claimed.
+
+## Design and implementation records
+
+- [Product Brief v1.0](docs/PRODUCT_BRIEF.md)
 - [Technical Plan v1.1](docs/TECHNICAL_PLAN.md)
-- [Agent workflow rules](AGENTS.md)
+- [M5 verification record](docs/M5_VERIFICATION.md)
+- [Repository workflow rules](AGENTS.md)
 
-## Architecture
-
-The approved design uses JavaScript ES modules, React/Vite, Express, SQLite through `node:sqlite`, and the OpenAI Responses API. The pinned OpenAI SDK and shared Zod contract support optional live analysis, with `gpt-6.1-sol` as the default and `OPENAI_MODEL` configurable in the server environment. No model fallback is performed. The server uses `store: false`, no tools, disabled SDK retries, and saved-context evidence allowlists. Offline evaluations make no provider request and do not fabricate provider metadata. See [local setup and demo identifiers](docs/SETUP.md) for optional live configuration, limitations, and verification commands.
-
-This is an independently authored project using fictional data. It contains no private-project source, internal documentation, credentials, or business-specific implementation details and implies no affiliation with an employer or API provider.
+The approved stack is JavaScript ES modules, React/Vite, Express, SQLite through `node:sqlite`, and optional server-side OpenAI Responses API inference. This is an independently authored portfolio project with fictional data and no employer or API-provider affiliation.
