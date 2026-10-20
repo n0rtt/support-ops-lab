@@ -4,14 +4,20 @@ import { dirname, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import {
   appendCaseActivity,
+  associateCaseEvidence,
   CaseNotFoundError,
   changeCaseStatus,
+  getDiagnostic,
   getCase,
+  getKnowledgeEntry,
   IdempotencyKeyReusedError,
+  InvalidEvidenceAssociationError,
   InvalidCaseTransitionError,
   InvalidEscalationEvidenceError,
   InvalidStatusContextError,
   listCases,
+  listKnowledgeEntries,
+  searchDiagnostics,
   runIdempotentMutation,
   StaleCaseError,
 } from './database.js';
@@ -32,6 +38,13 @@ const activityBodySchema = z.strictObject({
   text: nonblankTextSchema,
   expectedVersion: expectedVersionSchema,
 });
+const evidenceBodySchema = z.strictObject({
+  diagnosticIds: z.array(caseIdSchema).max(100),
+  expectedVersion: expectedVersionSchema,
+});
+const diagnosticQuerySchema = z.strictObject({
+  q: z.string().max(200).refine((value) => value.trim().length > 0),
+});
 const statusBodySchema = z.discriminatedUnion('status', [
   z.strictObject({ status: z.literal('open'), expectedVersion: expectedVersionSchema }),
   z.strictObject({ status: z.literal('in_progress'), expectedVersion: expectedVersionSchema }),
@@ -41,7 +54,7 @@ const statusBodySchema = z.discriminatedUnion('status', [
     reason: boundedTextSchema.optional(),
     findings: boundedTextSchema.optional(),
     questions: boundedTextSchema.optional(),
-    evidenceIds: z.array(z.string()).length(0).optional().default([]),
+    evidenceIds: z.array(caseIdSchema).max(100).optional().default([]),
   }),
   z.strictObject({
     status: z.literal('resolved'),
@@ -84,6 +97,13 @@ function validateActivityBody(body) {
   });
 }
 
+function validateEvidenceBody(body) {
+  return parseRequest(evidenceBodySchema, body, {
+    diagnosticIds: 'invalid_evidence',
+    expectedVersion: 'invalid_expected_version',
+  });
+}
+
 function validateStatusBody(body) {
   return parseRequest(statusBodySchema, body, {
     status: 'invalid_status',
@@ -101,11 +121,16 @@ function sendMutationError(res, error) {
     return res.status(error.status).json({ error: error.code });
   }
   if (error instanceof CaseNotFoundError) return res.status(404).json({ error: error.code });
+  if (error instanceof InvalidEvidenceAssociationError) {
+    return res.status(400).json({ error: error.code, details: error.details });
+  }
   if (error instanceof IdempotencyKeyReusedError || error instanceof StaleCaseError || error instanceof InvalidCaseTransitionError) {
     return res.status(409).json({ error: error.code });
   }
   if (error instanceof InvalidEscalationEvidenceError || error instanceof InvalidStatusContextError) {
-    return res.status(400).json({ error: error.code });
+    return res.status(400).json(error instanceof InvalidEscalationEvidenceError
+      ? { error: error.code, details: error.details }
+      : { error: error.code });
   }
   if (error.code === 'SQLITE_BUSY' || error.code === 'SQLITE_LOCKED') {
     return res.status(503).json({ error: 'save_temporarily_unavailable' });
@@ -169,6 +194,46 @@ export function createApp({ db, buildDirectory = defaultBuildDirectory }) {
     }
   });
 
+  app.get('/api/diagnostics', (req, res) => {
+    const result = diagnosticQuerySchema.safeParse(req.query);
+    if (!result.success) return res.status(400).json({ error: 'invalid_diagnostic_query' });
+    try {
+      res.json(searchDiagnostics(db, result.data.q.trim()));
+    } catch {
+      res.status(500).json({ error: 'diagnostic_search_unavailable' });
+    }
+  });
+
+  app.get('/api/diagnostics/:diagnosticId', (req, res) => {
+    if (!caseIdPattern.test(req.params.diagnosticId)) return res.status(400).json({ error: 'invalid_diagnostic_id' });
+    try {
+      const result = getDiagnostic(db, req.params.diagnosticId);
+      if (!result) return res.status(404).json({ error: 'diagnostic_not_found' });
+      res.json(result);
+    } catch {
+      res.status(500).json({ error: 'diagnostic_detail_unavailable' });
+    }
+  });
+
+  app.get('/api/knowledge', (_req, res) => {
+    try {
+      res.json({ entries: listKnowledgeEntries(db) });
+    } catch {
+      res.status(500).json({ error: 'knowledge_unavailable' });
+    }
+  });
+
+  app.get('/api/knowledge/:entryId', (req, res) => {
+    if (!caseIdPattern.test(req.params.entryId)) return res.status(400).json({ error: 'invalid_knowledge_id' });
+    try {
+      const entry = getKnowledgeEntry(db, req.params.entryId);
+      if (!entry) return res.status(404).json({ error: 'knowledge_entry_not_found' });
+      res.json({ entry });
+    } catch {
+      res.status(500).json({ error: 'knowledge_unavailable' });
+    }
+  });
+
   app.post('/api/cases/:caseId/activities', (req, res) => {
     try {
       validateCaseId(req.params.caseId);
@@ -215,6 +280,30 @@ export function createApp({ db, buildDirectory = defaultBuildDirectory }) {
           expectedVersion: payload.expectedVersion,
         },
         (connection) => changeCaseStatus(connection, { caseId: req.params.caseId, status: payload.status, context }),
+      );
+      res.json({ ...result.response, replayed: result.replayed });
+    } catch (error) {
+      sendMutationError(res, error);
+    }
+  });
+
+  app.post('/api/cases/:caseId/evidence', (req, res) => {
+    try {
+      validateCaseId(req.params.caseId);
+      const requestKey = req.get('idempotency-key');
+      validateRequestKey(requestKey);
+      const payload = validateEvidenceBody(req.body);
+      const result = runIdempotentMutation(
+        db,
+        {
+          requestKey,
+          method: req.method,
+          route: req.path,
+          caseId: req.params.caseId,
+          payload,
+          expectedVersion: payload.expectedVersion,
+        },
+        (connection) => associateCaseEvidence(connection, { caseId: req.params.caseId, ...payload }),
       );
       res.json({ ...result.response, replayed: result.replayed });
     } catch (error) {

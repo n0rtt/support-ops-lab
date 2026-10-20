@@ -7,7 +7,7 @@ if (args.length !== 1 || args[0] !== '--confirm') {
 } else {
   try {
     resetDemoDatabase({ confirmed: true });
-    console.log('Demo database was reset to the initial synthetic cases.');
+    console.log('Demo database was reset to the complete synthetic baseline.');
   } catch (error) {
     console.error(error.message);
     process.exitCode = 1;

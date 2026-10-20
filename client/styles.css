@@ -144,6 +144,54 @@ blockquote { margin: 0; padding: 16px 18px; border-left: 3px solid #73bdb2; bord
 .pending-action blockquote { padding: 9px 11px; font-size: 0.82rem; }
 .pending-action [role="alert"] { color: #833d28; }
 
+.diagnostic-section, .knowledge-section { display: grid; gap: 16px; margin: 28px 0; padding: 20px; border: 1px solid var(--line); border-radius: 10px; background: #fbfdfd; }
+.diagnostic-section h3, .knowledge-section h3 { margin: 0; font-size: 1.05rem; }
+.diagnostic-section .section-heading, .knowledge-section .section-heading { margin: 0; }
+.diagnostic-section .section-heading > div { display: grid; gap: 5px; }
+.empty-diagnostics, .diagnostic-search-summary { margin: 0; color: var(--ink-muted); font-size: 0.88rem; line-height: 1.5; }
+.diagnostic-search-form, .evidence-association-form { display: grid; gap: 12px; }
+.diagnostic-search-form label, .selected-diagnostics > strong { font-size: 0.88rem; font-weight: 650; }
+.diagnostic-search-form > div { display: flex; gap: 9px; }
+.diagnostic-search-form input[type="search"] { min-width: 0; flex: 1; padding: 10px 12px; border: 1px solid #b8c6cd; border-radius: 7px; color: inherit; font: inherit; }
+.diagnostic-search-form button, .diagnostic-result button, .diagnostic-card > button, .diagnostic-inspection > button, .knowledge-list button, .selected-diagnostics button {
+  padding: 8px 11px; border: 1px solid #b8c6cd; border-radius: 7px; color: #1c4949; background: #fff; font-size: 0.84rem; font-weight: 650; cursor: pointer;
+}
+.diagnostic-search-form button:hover, .diagnostic-result button:hover, .diagnostic-card > button:hover, .diagnostic-inspection > button:hover, .knowledge-list button:hover, .selected-diagnostics button:hover { border-color: var(--accent); background: #eff8f7; }
+.diagnostic-search-form button:focus-visible, .diagnostic-result button:focus-visible, .diagnostic-card button:focus-visible, .knowledge-list button:focus-visible, .selected-diagnostics button:focus-visible { outline: 3px solid #80d4ca; outline-offset: 2px; }
+.diagnostic-search-form button:disabled { opacity: 0.58; cursor: wait; }
+.linked-evidence-list, .diagnostic-results, .attempt-history, .knowledge-list { display: grid; gap: 10px; margin: 0; padding: 0; list-style: none; }
+.diagnostic-card, .diagnostic-result, .knowledge-entry { display: grid; gap: 10px; padding: 14px; border: 1px solid var(--line); border-radius: 9px; background: #fff; }
+.diagnostic-card-heading, .diagnostic-result-heading { display: flex; flex-wrap: wrap; align-items: center; gap: 8px 14px; }
+.diagnostic-card-heading > span, .diagnostic-result-heading > span { color: var(--ink-muted); font-size: 0.8rem; }
+.diagnostic-result-heading label, .attempt-history label, .escalation-evidence label { display: flex; align-items: flex-start; gap: 8px; color: #354c58; font-size: 0.84rem; }
+.diagnostic-result-heading input, .attempt-history input, .escalation-evidence input { width: auto; margin: 2px 0 0; accent-color: var(--accent); }
+.diagnostic-result > p { margin: 0; color: var(--ink-muted); font-size: 0.82rem; line-height: 1.45; }
+.diagnostic-facts { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 10px 16px; margin: 0; }
+.diagnostic-facts div { min-width: 0; }
+.diagnostic-facts dt { margin-bottom: 3px; color: var(--ink-muted); font-size: 0.72rem; }
+.diagnostic-facts dd { overflow-wrap: anywhere; margin: 0; color: #223a47; font-size: 0.82rem; line-height: 1.45; }
+.diagnostic-facts .diagnostic-fact-wide { grid-column: 1 / -1; }
+.selected-diagnostics { display: grid; gap: 8px; padding: 12px; border-radius: 8px; background: #f2f7f8; }
+.selected-diagnostics ul { display: flex; flex-wrap: wrap; gap: 7px; margin: 0; padding: 0; list-style: none; }
+.selected-diagnostics li { display: flex; align-items: center; gap: 7px; padding: 4px 6px 4px 9px; border: 1px solid var(--line); border-radius: 7px; background: #fff; font-size: 0.8rem; }
+.selected-diagnostics button { padding: 4px 6px; font-size: 0.74rem; }
+.diagnostic-inspection { display: grid; gap: 12px; padding: 16px; border: 1px solid #a8cec9; border-radius: 9px; background: #f3faf9; }
+.diagnostic-inspection h4, .knowledge-entry h4 { margin: 0; color: #1c4548; font-size: 0.95rem; }
+.diagnostic-inspection .section-heading { margin-top: 8px; }
+.attempt-history { padding-left: 0; }
+.knowledge-list button { width: 100%; text-align: left; }
+.knowledge-entry p { margin: 0; color: #344c59; line-height: 1.6; }
+.escalation-evidence { display: grid; width: min(100%, 620px); gap: 9px; margin: 4px 0; padding: 12px; border: 1px solid var(--line); border-radius: 8px; }
+.escalation-evidence legend { padding: 0 5px; color: #354c58; font-size: 0.84rem; font-weight: 650; }
+.escalation-evidence .field-hint { margin: 0; }
+
+@media (max-width: 760px) {
+  .diagnostic-section, .knowledge-section { padding: 14px; }
+  .diagnostic-search-form > div { align-items: stretch; flex-direction: column; }
+  .diagnostic-facts { grid-template-columns: 1fr; }
+  .diagnostic-facts .diagnostic-fact-wide { grid-column: auto; }
+}
+
 @media (max-width: 900px) {
   .action-grid { grid-template-columns: 1fr; }
 }
