@@ -1,6 +1,6 @@
 # Support Engineering Workbench
 
-**Status: The Product Owner's synthetic search-ID discoverability correction is implemented in this follow-up. Independent technical re-review, final Product Owner acceptance, merge authorization, and integrated CI are pending.**
+**Status: The synthetic search-ID correction was independently approved at implementation SHA `4caff3b8cc5e44707a7818bd62cf5d6ed2dc895d`, and PR CI passed on that SHA. Final Product Owner acceptance, merge authorization, and integrated CI remain pending.**
 
 This public portfolio project is a local-first workbench for fictional API integration support cases. M1 provides the working foundation and synthetic reports. M2 adds the manual support workflow. The M3 branch adds exact diagnostic lookup, explicit evidence association, event-attempt inspection, and four read-only knowledge entries. No AI credentials or external services are required.
 

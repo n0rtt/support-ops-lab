@@ -71,4 +71,4 @@ The browser suite uses a temporary SQLite database and does not touch the local 
 
 ## Milestone status
 
-The M3 implementation is on an isolated branch based on approved M2 integration SHA `f5de45fcfc8a73aeee4acf62f1888836cce40233`. The Product Owner's synthetic search-ID discoverability correction is implemented in this follow-up; independent technical re-review, final Product Owner acceptance, merge authorization, and integrated CI are pending. M4 analysis and review workflows remain future work. No external messaging, delivery replay, event ingestion, authentication, or deployment feature is included.
+The M3 implementation is on an isolated branch based on approved M2 integration SHA `f5de45fcfc8a73aeee4acf62f1888836cce40233`. The synthetic search-ID correction was independently approved at implementation SHA `4caff3b8cc5e44707a7818bd62cf5d6ed2dc895d`, and PR CI passed on that SHA. Final Product Owner acceptance, merge authorization, and integrated CI remain pending. M4 analysis and review workflows remain future work. No external messaging, delivery replay, event ingestion, authentication, or deployment feature is included.
