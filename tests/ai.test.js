@@ -113,6 +113,11 @@ test('Responses refusal and incomplete states stay distinct from malformed struc
   const failed = await run(sdkResponse({ status: 'failed' }));
   assert.equal(failed.status, 'failed');
   assert.equal(failed.failureCode, 'provider_unavailable');
+  const withoutStatus = sdkResponse();
+  delete withoutStatus.status;
+  const parsedWithoutStatus = await run(withoutStatus);
+  assert.equal(parsedWithoutStatus.status, 'completed');
+  assert.deepEqual(parsedWithoutStatus.recommendation, analysisFixtures[0].recommendation);
   const malformed = await run(sdkResponse({ content: [{ type: 'output_text', text: '{"classification":"unknown"}', annotations: [] }] }));
   assert.equal(malformed.status, 'failed');
   assert.equal(malformed.failureCode, 'invalid_output');
