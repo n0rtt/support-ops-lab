@@ -1,7 +1,7 @@
 # M5 verification record
 
 **Milestone:** M5 — Final Acceptance & Portfolio Presentation · **Approved base:** `583a864eaa3f293f5437fd3134db4361860eee85`
-**Status:** Executor verification only. A different independent technical review and Product Owner acceptance remain outstanding.
+**Review and acceptance record:** The [independent M5 technical report](https://github.com/n0rtt/support-ops-lab/pull/5#issuecomment-6300932443) records **APPROVE** for implementation head `d22cbca47897452c0222805ba3c280fe9fe8bfc7`; its [exact-head CI run 39492524969](https://github.com/n0rtt/support-ops-lab/actions/runs/39492524969) succeeded. The Product Owner reports manual acceptance **PASS** for all seven Scenario A walkthrough checks in this project conversation; no public decision link exists.
 
 ## Local setup and checks
 
@@ -63,6 +63,6 @@ To reproduce them, use the no-key setup in [SETUP](SETUP.md), complete [Scenario
 
 PRs #1–#4, actual heads and integration SHAs, published review reports, Product Owner decisions, and PR/integrated-main CI runs are linked in [engineering history](ENGINEERING_HISTORY.md). The M4 accepted live-inference record remains separate from M5 local restart evidence.
 
-The independent PR #5 review requested changes at `1beddc5275f58a7d436135fd1ccb9fb77beb02c3` for screenshot readability and framing, the structured editor at 320px, and README first-screen disclosure. The follow-up adds two larger unaltered app captures, documents their visible case context, tests the open editor at 320px, and moves the no-key/simulated boundary above the screenshots. Independent exact-head re-review remains pending.
+The initial PR #5 independent report requested changes at `1beddc5275f58a7d436135fd1ccb9fb77beb02c3` for screenshot readability and framing, the structured editor at 320px, and README first-screen disclosure. The follow-up addressed those findings with larger unaltered app captures, visible case context, an open-editor check at 320px, and the no-key/simulated boundary above the screenshots. The resulting implementation head `d22cbca47897452c0222805ba3c280fe9fe8bfc7` received **APPROVE** in the [final independent M5 technical report](https://github.com/n0rtt/support-ops-lab/pull/5#issuecomment-6300932443); the [exact-head PR CI run 39492524969](https://github.com/n0rtt/support-ops-lab/actions/runs/39492524969) succeeded.
 
-M5 remains open for a different independent technical review. This record does not claim M5 Product Owner acceptance, merge, deployment, or MVP completion. The final M5 head and its PR CI run are reported on the open pull request.
+The Product Owner reports manually completing and accepting all seven checks of the principal Scenario A walkthrough. This decision was provided in the project conversation and has no public decision link. The M5 approval report and CI are separate from that Product Owner decision; this record contains no merge attestation or integrated-main CI result. Native browser zoom, comprehensive accessibility, and restart of the prior live-analysis-specific record were not verified.

@@ -50,7 +50,7 @@ Each milestone follows **Product Owner → Technical Orchestrator → Executor �
 
 The [engineering history](docs/ENGINEERING_HISTORY.md) links PRs #1–#4, their review reports, exact integration commits, and actual PR and integrated-main CI runs. The independent AI-agent reports were published through the repository owner's GitHub account. GitHub has no formal review submissions for those PRs, so the reports are not presented as GitHub-verified reviewer identities.
 
-M5 is open for a different independent technical review. Product Owner acceptance, merge, deployment, and MVP completion have not been claimed.
+On M5 implementation head `d22cbca47897452c0222805ba3c280fe9fe8bfc7`, the [final independent technical report](https://github.com/n0rtt/support-ops-lab/pull/5#issuecomment-6300932443) records **APPROVE**, and its [exact-head CI run 39492524969](https://github.com/n0rtt/support-ops-lab/actions/runs/39492524969) succeeded. The Product Owner reports manual acceptance of all seven Scenario A walkthrough checks in this project conversation; no public decision link exists. These records do not include an integrated-main CI result or merge evidence.
 
 ## Design and implementation records
 
