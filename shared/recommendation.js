@@ -25,8 +25,16 @@ export const recommendationSchema = z.strictObject({
 export function validateRecommendation(value) {
   const result = recommendationSchema.safeParse(value);
   if (!result.success) return result;
-  if (result.data.classification === 'insufficient_evidence' && result.data.uncertainty.length === 0) {
-    return { success: false, error: new Error('Insufficient-evidence recommendations must state what is unknown.') };
+  const recommendation = result.data;
+  const hasBlankText = [
+    ...recommendation.observations.map((item) => item.text),
+    ...(recommendation.possibleCause ? [recommendation.possibleCause.text] : []),
+    ...recommendation.nextSteps,
+    recommendation.draftResponse,
+    ...recommendation.uncertainty,
+  ].some((text) => !text.trim());
+  if (hasBlankText || (recommendation.classification === 'insufficient_evidence' && recommendation.uncertainty.length === 0)) {
+    return { success: false, error: new Error('Recommendations must contain nonblank required text and state uncertainty when evidence is insufficient.') };
   }
   return result;
 }

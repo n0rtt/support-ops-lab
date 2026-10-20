@@ -45,8 +45,11 @@ Search accepts one exact, case-sensitive row ID, request ID, or event ID. Surrou
 | A — authentication | `SEW-1001` / `ORG-ALDER-01` | `req_auth_20261019_001`, `req_auth_20261019_002`, `req_auth_20261019_003`; rows `DIAG-AUTH-401-001` through `DIAG-AUTH-401-003` | Three linked HTTP 401 API observations. Inspect `KB-AUTH-01`; repeated 401 responses alone do not establish a provider outage. |
 | B — subscription webhook | `SEW-1002` / `ORG-CEDAR-02` | Event `evt_subscription_480`; rows `DIAG-WH-SUB-001`, `DIAG-WH-SUB-002`, `DIAG-WH-SUB-003` | Initially unlinked attempts: HTTP 500, timeout with no HTTP response, then HTTP 204 acknowledgment. The acknowledgment does not establish downstream processing. |
 | B — invoice webhook | `SEW-1002` / `ORG-CEDAR-02` | Event `evt_invoice_731`; rows `DIAG-WH-INV-001`, `DIAG-WH-INV-002` | Initially unlinked attempts: HTTP 503, then a pending retry with no observed delivery time or response. |
+
 | Unrelated organization | No case | Row `DIAG-OTHER-001`; event ID `evt_subscription_480` | Global search also returns `ORG-MAPLE-99`. Its history stays separate from Cedar’s same-ID event, and its row cannot be linked to another organization’s case. |
 | C — missing evidence | `SEW-1003` | For a reproducible no-result check, search `req_missing_case_c_20261020` | No diagnostic is seeded for this case. The empty result does not imply that a failure or outage occurred. Ask for an exact request ID and UTC window, or escalate with no evidence. |
+
+Fixture B is available only after an operator explicitly links all five subscription and invoice attempts. It discusses the HTTP 500, timeout, HTTP 204 acknowledgment, HTTP 503, and pending retry while keeping downstream processing unknown.
 
 The four inspectable knowledge entries are `KB-AUTH-01`, `KB-WEBHOOK-01`, `KB-REQUEST-01`, and `KB-OUTAGE-01`. They are fictional, versioned plain text; there is no retrieval service or generated guidance.
 

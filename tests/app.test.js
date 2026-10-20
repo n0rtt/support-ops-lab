@@ -2,7 +2,9 @@ import assert from 'node:assert/strict';
 import { createServer, request } from 'node:http';
 import { test } from 'node:test';
 import { createApp } from '../server/app.js';
+import { createOpenAIAnalyzer } from '../server/ai.js';
 import { initializeDatabase, openDatabase } from '../server/database.js';
+import { analysisFixtures } from '../fixtures/analyses.js';
 import { temporaryDatabase } from './helpers.js';
 
 async function listen(db, options = {}) {
@@ -658,6 +660,7 @@ test('all three offline evaluations keep explicit provenance, prerequisites, con
   let { analysis: incorrect } = await (await fetch(baseUrl + '/api/analyses/' + firstAck.analysisId)).json();
   assert.equal(incorrect.source, 'fixture');
   assert.equal(incorrect.fixtureId, fixtureA.id);
+  assert.equal(incorrect.fixtureVersion, '1.0.0');
   assert.match(incorrect.fixtureLabel, /intentionally incorrect/);
   assert.equal(incorrect.provider, null);
   assert.equal(incorrect.requestedModel, null);
@@ -677,6 +680,12 @@ test('all three offline evaluations keep explicit provenance, prerequisites, con
   });
   assert.equal(response.status, 200);
   a = (await detail(baseUrl, 'SEW-1001')).case;
+  response = await patchStatus(baseUrl, 'SEW-1001', 'resolve-after-correction', {
+    status: 'resolved', expectedVersion: a.version,
+    outcome: 'Customer replaced an expired key and confirmed recovery.',
+  });
+  assert.equal(response.status, 200);
+  a = (await detail(baseUrl, 'SEW-1001')).case;
   response = await postAnalysis(baseUrl, 'SEW-1001', 'fixture-a-reanalysis', {
     source: 'fixture', fixtureId: fixtureA.id, expectedVersion: a.version,
   });
@@ -685,6 +694,10 @@ test('all three offline evaluations keep explicit provenance, prerequisites, con
   const secondA = (await (await fetch(baseUrl + '/api/analyses/' + reanalysis.analysisId)).json()).analysis;
   assert.equal(secondA.context.correctiveFeedback.length, 1);
   assert.match(secondA.context.correctiveFeedback[0].feedback, /401 responses indicate rejected authentication/);
+  assert.equal(secondA.context.correctiveFeedback[0].source, 'fixture');
+  assert.equal(secondA.context.correctiveFeedback[0].fixtureId, fixtureA.id);
+  assert.equal(secondA.context.correctiveFeedback[0].fixtureVersion, '1.0.0');
+  assert.ok(secondA.context.operatorHistory.some((item) => item.to === 'resolved' && item.outcome === 'Customer replaced an expired key and confirmed recovery.'));
   incorrect = (await (await fetch(baseUrl + '/api/analyses/' + incorrect.id)).json()).analysis;
   assert.equal(incorrect.reviews.length, 1);
   assert.equal(incorrect.reviews[0].decision, 'rejected');
@@ -703,6 +716,31 @@ test('all three offline evaluations keep explicit provenance, prerequisites, con
   });
   assert.equal(response.status, 200);
   b = (await detail(baseUrl, 'SEW-1002')).case;
+  assert.equal(b.analysisFixtures[0].available, false);
+  const analysisCountBeforeIncompleteB = db.prepare('SELECT COUNT(*) AS count FROM analyses').get().count;
+  response = await postAnalysis(baseUrl, 'SEW-1002', 'fixture-b-four-missing-second', {
+    source: 'fixture', fixtureId: fixtureB.id, expectedVersion: b.version,
+  });
+  assert.equal(response.status, 409);
+  assert.equal(db.prepare('SELECT COUNT(*) AS count FROM analyses').get().count, analysisCountBeforeIncompleteB);
+  response = await fetch(baseUrl + '/api/cases/SEW-1002/evidence', {
+    method: 'POST', headers: mutationHeaders(baseUrl, 'link-b-invoice-failure'),
+    body: JSON.stringify({ diagnosticIds: ['DIAG-WH-INV-001'], expectedVersion: b.version }),
+  });
+  assert.equal(response.status, 200);
+  b = (await detail(baseUrl, 'SEW-1002')).case;
+  assert.equal(b.analysisFixtures[0].available, false);
+  response = await postAnalysis(baseUrl, 'SEW-1002', 'fixture-b-four-linked', {
+    source: 'fixture', fixtureId: fixtureB.id, expectedVersion: b.version,
+  });
+  assert.equal(response.status, 409);
+  assert.equal(db.prepare('SELECT COUNT(*) AS count FROM analyses').get().count, analysisCountBeforeIncompleteB);
+  response = await fetch(baseUrl + '/api/cases/SEW-1002/evidence', {
+    method: 'POST', headers: mutationHeaders(baseUrl, 'link-b-invoice-pending'),
+    body: JSON.stringify({ diagnosticIds: ['DIAG-WH-INV-002'], expectedVersion: b.version }),
+  });
+  assert.equal(response.status, 200);
+  b = (await detail(baseUrl, 'SEW-1002')).case;
   assert.equal(b.analysisFixtures[0].available, true);
   response = await postAnalysis(baseUrl, 'SEW-1002', 'fixture-b', {
     source: 'fixture', fixtureId: fixtureB.id, expectedVersion: b.version,
@@ -711,7 +749,13 @@ test('all three offline evaluations keep explicit provenance, prerequisites, con
   const bAck = await response.json();
   const originalB = (await (await fetch(baseUrl + '/api/analyses/' + bAck.analysisId)).json()).analysis;
   assert.equal(originalB.referenceValidation.valid, true);
-  assert.equal(originalB.context.diagnostics.length, 3);
+  assert.equal(originalB.fixtureVersion, '1.0.0');
+  assert.equal(originalB.context.diagnostics.length, 5);
+  assert.deepEqual(originalB.context.diagnostics.map((item) => item.id), [
+    'DIAG-WH-SUB-001', 'DIAG-WH-SUB-002', 'DIAG-WH-SUB-003', 'DIAG-WH-INV-001', 'DIAG-WH-INV-002',
+  ]);
+  assert.match(originalB.recommendation.draftResponse, /HTTP 503/);
+  assert.match(originalB.recommendation.draftResponse, /pending retry/);
 
   const edited = {
     ...originalB.recommendation,
@@ -763,8 +807,11 @@ test('live analysis reservation is durable and idempotent, rejects unsupported r
   const { baseUrl } = await testServer(t, {
     analyze: async () => {
       calls += 1;
-      signalStarted();
-      return new Promise((resolve) => { releaseInference = resolve; });
+      if (calls === 1) {
+        signalStarted();
+        return new Promise((resolve) => { releaseInference = resolve; });
+      }
+      return { status: 'completed', recommendation: analysisFixtures[0].recommendation, provider: 'openai', requestedModel: 'gpt-6.1-sol' };
     },
   });
   const caseA = (await detail(baseUrl, 'SEW-1001')).case;
@@ -815,7 +862,14 @@ test('live analysis reservation is durable and idempotent, rejects unsupported r
     feedback: 'This diagnostic exists but was not supplied to the analysis. It cannot support the recommendation.',
   });
   assert.equal(response.status, 200);
-  assert.equal((await detail(baseUrl, 'SEW-1001')).case.status, 'open');
+  const correctedCase = (await detail(baseUrl, 'SEW-1001')).case;
+  assert.equal(correctedCase.status, 'open');
+  response = await postAnalysis(baseUrl, caseA.id, 'live-correction-context', { source: 'live', expectedVersion: correctedCase.version });
+  assert.equal(response.status, 202);
+  const reanalysis = await waitForAnalysis(baseUrl, (await response.json()).analysisId);
+  assert.equal(reanalysis.context.correctiveFeedback[0].source, 'live');
+  assert.equal(reanalysis.context.correctiveFeedback[0].provider, 'openai');
+  assert.equal(reanalysis.context.correctiveFeedback[0].requestedModel, 'gpt-6.1-sol');
 });
 
 test('live refusal, incomplete, timeout, and malformed-output results become durable terminal states', async (t) => {
@@ -853,6 +907,15 @@ test('live refusal, incomplete, timeout, and malformed-output results become dur
   assert.equal(malformedAnalysis.status, 'failed');
   assert.equal(malformedAnalysis.failureCode, 'invalid_output');
   assert.equal(malformedAnalysis.recommendation, null);
+
+  const currentAfterMalformed = (await detail(baseUrl, 'SEW-1001')).case;
+  results.set('SEW-1001', { status: 'completed', recommendation: { ...analysisFixtures[2].recommendation, draftResponse: '   ' } });
+  const blankText = await postAnalysis(baseUrl, 'SEW-1001', 'failure-blank-recommendation-text', {
+    source: 'live', expectedVersion: currentAfterMalformed.version,
+  });
+  const blankTextAnalysis = await waitForAnalysis(baseUrl, (await blankText.json()).analysisId);
+  assert.equal(blankTextAnalysis.status, 'failed');
+  assert.equal(blankTextAnalysis.failureCode, 'invalid_output');
 });
 
 test('analysis context over 100 KiB is rejected without a durable reservation', async (t) => {
@@ -870,4 +933,121 @@ test('analysis context over 100 KiB is rejected without a durable reservation', 
   assert.equal(db.prepare('SELECT COUNT(*) AS count FROM analyses').get().count, 0);
   assert.equal(db.prepare("SELECT COUNT(*) AS count FROM mutation_receipts WHERE request_key = 'oversized-context'").get().count, 0);
   assert.equal((await detail(baseUrl, 'SEW-1001')).case.version, current.version);
+});
+
+test('live analysis receipt replays after provider configuration is removed', async (t) => {
+  const { databasePath } = temporaryDatabase(t);
+  let db = openDatabase(databasePath);
+  initializeDatabase(db);
+  let calls = 0;
+  let runningServer = await listen(db, { analyze: async () => { calls += 1; return new Promise(() => {}); } });
+  t.after(async () => { await runningServer.close(); db.close(); });
+  const current = (await detail(runningServer.baseUrl, 'SEW-1001')).case;
+  const payload = { source: 'live', expectedVersion: current.version };
+  const initial = await postAnalysis(runningServer.baseUrl, 'SEW-1001', 'replay-after-config-removal', payload);
+  assert.equal(initial.status, 202);
+  const ack = await initial.json();
+  await new Promise((resolve) => setTimeout(resolve, 5));
+  assert.equal(calls, 1);
+
+  await runningServer.close();
+  db.close();
+  db = openDatabase(databasePath);
+  initializeDatabase(db);
+  runningServer = await listen(db);
+  const replay = await postAnalysis(runningServer.baseUrl, 'SEW-1001', 'replay-after-config-removal', payload);
+  assert.equal(replay.status, 202);
+  assert.deepEqual(await replay.json(), { ...ack, replayed: true });
+
+  const collision = await postAnalysis(runningServer.baseUrl, 'SEW-1001', 'replay-after-config-removal', {
+    source: 'live', expectedVersion: current.version + 1,
+  });
+  assert.equal(collision.status, 409);
+  assert.equal((await collision.json()).error, 'idempotency_key_reused');
+  const latest = (await detail(runningServer.baseUrl, 'SEW-1001')).case;
+  const unavailable = await postAnalysis(runningServer.baseUrl, 'SEW-1001', 'new-request-without-provider', {
+    source: 'live', expectedVersion: latest.version,
+  });
+  assert.equal(unavailable.status, 503);
+  assert.equal((await unavailable.json()).error, 'live_inference_unavailable');
+  assert.equal(db.prepare('SELECT COUNT(*) AS count FROM analyses').get().count, 1);
+  assert.equal(db.prepare("SELECT COUNT(*) AS count FROM mutation_receipts WHERE request_key = 'new-request-without-provider'").get().count, 0);
+  assert.equal(calls, 1);
+});
+
+test('terminal write failure is visible and polling recovers the staged result without redispatch', async (t) => {
+  let calls = 0;
+  const { baseUrl, db } = await testServer(t, { analyze: async () => {
+    calls += 1;
+    return { status: 'completed', recommendation: analysisFixtures[0].recommendation, provider: 'openai', requestedModel: 'gpt-6.1-sol' };
+  } });
+  db.exec("CREATE TRIGGER fail_terminal_analysis BEFORE UPDATE OF status ON analyses WHEN NEW.status <> OLD.status BEGIN SELECT RAISE(ABORT, 'injected terminal write failure'); END");
+  const current = (await detail(baseUrl, 'SEW-1001')).case;
+  const response = await postAnalysis(baseUrl, 'SEW-1001', 'recover-terminal-write', { source: 'live', expectedVersion: current.version });
+  assert.equal(response.status, 202);
+  const ack = await response.json();
+  let analysis;
+  for (let attempt = 0; attempt < 50; attempt += 1) {
+    analysis = (await (await fetch(baseUrl + '/api/analyses/' + ack.analysisId)).json()).analysis;
+    if (analysis.completionPending) break;
+    await new Promise((resolve) => setTimeout(resolve, 5));
+  }
+  assert.equal(analysis.status, 'running');
+  assert.equal(analysis.completionPending, true);
+  assert.equal(calls, 1);
+
+  db.exec('DROP TRIGGER fail_terminal_analysis');
+  const recovered = (await (await fetch(baseUrl + '/api/cases/SEW-1001')).json()).case.analyses.find((item) => item.id === ack.analysisId);
+  assert.equal(recovered.status, 'completed');
+  assert.equal(recovered.completionPending, false);
+  assert.equal(calls, 1);
+});
+
+test('analysis inspection preserves and dispatches the reservation request envelope', async (t) => {
+  let started;
+  const startedPromise = new Promise((resolve) => { started = resolve; });
+  let release;
+  const held = new Promise((resolve) => { release = resolve; });
+  let db;
+  let dispatched;
+  const analyzer = createOpenAIAnalyzer({
+    model: 'gpt-6.1-sol',
+    client: { responses: { parse: async (requestEnvelope) => {
+      dispatched = requestEnvelope;
+      started();
+      await held;
+      return { id: 'resp_saved_envelope', model: requestEnvelope.model, status: 'completed', output_parsed: analysisFixtures[0].recommendation, output: [] };
+    } } },
+  });
+  const testApp = await testServer(t, { analyze: analyzer });
+  db = testApp.db;
+  const current = (await detail(testApp.baseUrl, 'SEW-1001')).case;
+  const response = await postAnalysis(testApp.baseUrl, 'SEW-1001', 'saved-envelope', { source: 'live', expectedVersion: current.version });
+  const ack = await response.json();
+  await startedPromise;
+  const running = (await (await fetch(testApp.baseUrl + '/api/analyses/' + ack.analysisId)).json()).analysis;
+  assert.equal(running.provider, 'openai');
+  assert.equal(running.requestedModel, 'gpt-6.1-sol');
+  assert.deepEqual(dispatched, running.requestEnvelope);
+  assert.equal(running.requestEnvelope.store, false);
+  assert.deepEqual(running.requestEnvelope.tools, []);
+  assert.equal(running.requestEnvelope.model, 'gpt-6.1-sol');
+  release();
+  const completed = await waitForAnalysis(testApp.baseUrl, ack.analysisId);
+  assert.equal(completed.status, 'completed');
+  assert.equal(completed.responseId, 'resp_saved_envelope');
+  assert.deepEqual(completed.requestEnvelope, running.requestEnvelope);
+});
+
+test('analysis context rejects cross-organization linked evidence before receipt or inference', async (t) => {
+  let calls = 0;
+  const { baseUrl, db } = await testServer(t, { analyze: async () => { calls += 1; return { status: 'failed', failureCode: 'not_expected' }; } });
+  const current = (await detail(baseUrl, 'SEW-1001')).case;
+  db.prepare('UPDATE cases SET organization_id = ? WHERE id = ?').run('ORG-CHANGED', current.id);
+  const response = await postAnalysis(baseUrl, current.id, 'reject-cross-org-api', { source: 'live', expectedVersion: current.version });
+  assert.equal(response.status, 409);
+  assert.equal((await response.json()).error, 'analysis_context_integrity_error');
+  assert.equal(db.prepare('SELECT COUNT(*) AS count FROM analyses').get().count, 0);
+  assert.equal(db.prepare("SELECT COUNT(*) AS count FROM mutation_receipts WHERE request_key = 'reject-cross-org-api'").get().count, 0);
+  assert.equal(calls, 0);
 });

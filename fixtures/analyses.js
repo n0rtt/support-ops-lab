@@ -1,6 +1,7 @@
 export const analysisFixtures = [
   {
     id: 'fixture-a-intentional-outage-error',
+    version: '1.0.0',
     caseId: 'SEW-1001',
     title: 'A — intentionally incorrect outage diagnosis',
     label: 'Synthetic evaluation fixture · intentionally incorrect',
@@ -29,29 +30,33 @@ export const analysisFixtures = [
   },
   {
     id: 'fixture-b-webhook-delivery',
+    version: '1.0.0',
     caseId: 'SEW-1002',
     title: 'B — webhook delivery evidence',
     label: 'Synthetic evaluation fixture',
-    requires: { diagnosticIds: ['DIAG-WH-SUB-001', 'DIAG-WH-SUB-002', 'DIAG-WH-SUB-003'], noDiagnostics: false },
+    requires: { diagnosticIds: ['DIAG-WH-SUB-001', 'DIAG-WH-SUB-002', 'DIAG-WH-SUB-003', 'DIAG-WH-INV-001', 'DIAG-WH-INV-002'], noDiagnostics: false },
     recommendation: {
       classification: 'webhook_delivery',
       observations: [
         { text: 'The first supplied attempt returned HTTP 500.', references: [{ kind: 'diagnostic', id: 'DIAG-WH-SUB-001' }] },
         { text: 'The second attempt timed out without an HTTP response.', references: [{ kind: 'diagnostic', id: 'DIAG-WH-SUB-002' }] },
         { text: 'The third attempt received HTTP 204 acknowledgment; downstream processing was not observed.', references: [{ kind: 'diagnostic', id: 'DIAG-WH-SUB-003' }] },
+        { text: 'The invoice event attempt returned HTTP 503.', references: [{ kind: 'diagnostic', id: 'DIAG-WH-INV-001' }] },
+        { text: 'A retry for the invoice event is pending; no delivery time or response was observed.', references: [{ kind: 'diagnostic', id: 'DIAG-WH-INV-002' }] },
       ],
       possibleCause: null,
       nextSteps: [
         'Ask the customer to confirm whether their receiver processed the acknowledged event.',
         'Compare the event ID with the customer application logs for the supplied attempt times.',
       ],
-      draftResponse: 'We observed two unsuccessful delivery attempts followed by an HTTP 204 acknowledgment from your endpoint. That confirms the endpoint acknowledged the request, but we cannot confirm downstream processing. Could you check your receiver logs for the event?',
+      draftResponse: 'We observed HTTP 500 and timeout results for the subscription event, followed by an HTTP 204 acknowledgment. The invoice event has an HTTP 503 result and a pending retry with no observed response. The 204 confirms endpoint acknowledgment only; we cannot confirm downstream processing for either event. Could you check your receiver logs for both event IDs?',
       references: [{ kind: 'knowledge', id: 'KB-WEBHOOK-01' }],
       uncertainty: ['The receiving application’s downstream processing result was not supplied.'],
     },
   },
   {
     id: 'fixture-c-insufficient-evidence',
+    version: '1.0.0',
     caseId: 'SEW-1003',
     title: 'C — insufficient evidence',
     label: 'Synthetic evaluation fixture',

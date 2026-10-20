@@ -39,7 +39,8 @@ test('the pinned OpenAI SDK sends the saved context through Responses strict Str
     },
   });
   const context = { case: { id: 'SEW-1001' }, diagnostics: [{ id: 'DIAG-AUTH-401-001' }] };
-  const result = await analyzer(context);
+  const savedEnvelope = JSON.parse(JSON.stringify(analyzer.buildRequestEnvelope(context)));
+  const result = await analyzer(context, savedEnvelope);
 
   assert.equal(result.status, 'completed');
   assert.equal(result.provider, 'openai');
@@ -49,6 +50,9 @@ test('the pinned OpenAI SDK sends the saved context through Responses strict Str
   assert.deepEqual(result.recommendation, analysisFixtures[0].recommendation);
   assert.match(request.url, /\/v1\/responses$/);
   assert.equal(request.body.model, 'gpt-6.1-sol');
+  assert.deepEqual(request.body, savedEnvelope);
+  assert.equal(analyzer.provider, 'openai');
+  assert.equal(analyzer.requestedModel, 'gpt-6.1-sol');
   assert.equal(request.body.store, false);
   assert.deepEqual(request.body.tools, []);
   assert.equal(request.body.max_output_tokens, 4096);

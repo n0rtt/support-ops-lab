@@ -7,11 +7,13 @@ import {
   appendAnalysisReview,
   associateCaseEvidence,
   AnalysisContextTooLargeError,
+  AnalysisContextIntegrityError,
   AnalysisInProgressError,
   AnalysisNotFoundError,
   AnalysisNotReadyError,
   getAnalysis,
   finishAnalysis,
+  stageAnalysisResult,
   CaseNotFoundError,
   changeCaseStatus,
   getDiagnostic,
@@ -23,6 +25,7 @@ import {
   InvalidEscalationEvidenceError,
   InvalidStatusContextError,
   listCases,
+  listCaseAnalyses,
   listReviewQuality,
   listKnowledgeEntries,
   searchDiagnostics,
@@ -94,6 +97,10 @@ class RequestValidationError extends Error {
   }
 }
 
+class LiveInferenceUnavailableError extends Error {
+  constructor() { super('Live inference is not configured.'); this.code = 'live_inference_unavailable'; }
+}
+
 function parseRequest(schema, value, codes) {
   const result = schema.safeParse(value);
   if (result.success) return result.data;
@@ -162,6 +169,8 @@ function sendMutationError(res, error) {
   if (error instanceof AnalysisInProgressError || error instanceof AnalysisNotReadyError || error instanceof InvalidAnalysisFixtureError || error instanceof UnsupportedAnalysisReferencesError) {
     return res.status(409).json({ error: error.code, ...(error.details ? { details: error.details } : {}) });
   }
+  if (error instanceof AnalysisContextIntegrityError) return res.status(409).json({ error: error.code });
+  if (error instanceof LiveInferenceUnavailableError) return res.status(503).json({ error: error.code });
   if (error instanceof AnalysisContextTooLargeError) return res.status(413).json({ error: error.code });
   if (error instanceof InvalidReviewError) return res.status(400).json({ error: error.code });
   if (error instanceof InvalidEscalationEvidenceError || error instanceof InvalidStatusContextError) {
@@ -189,6 +198,7 @@ function sameOrigin(req) {
 export function createApp({ db, buildDirectory = defaultBuildDirectory, analyze = null }) {
   if (!db) throw new TypeError('A database connection is required.');
   const app = express();
+  const volatileCompletionResults = new Map();
   app.disable('x-powered-by');
 
   app.use((req, res, next) => {
@@ -220,11 +230,44 @@ export function createApp({ db, buildDirectory = defaultBuildDirectory, analyze 
     }
   });
 
+  function retryCompletion(analysisId) {
+    const volatileResult = volatileCompletionResults.get(analysisId);
+    if (volatileResult) {
+      try {
+        const staged = stageAnalysisResult(db, { analysisId, result: volatileResult });
+        volatileCompletionResults.delete(analysisId);
+        if (!staged.applied) return;
+      } catch {
+        return;
+      }
+    }
+    try { finishAnalysis(db, { analysisId }); } catch {
+      // Retain the staged result; the next read retries persistence without inference.
+    }
+  }
+
+  function persistInferenceResult(analysisId, result) {
+    try {
+      const staged = stageAnalysisResult(db, { analysisId, result });
+      if (!staged.applied) return;
+      finishAnalysis(db, { analysisId });
+    } catch {
+      volatileCompletionResults.set(analysisId, result);
+    }
+  }
+
   app.get('/api/cases/:caseId', (req, res) => {
     if (!caseIdPattern.test(req.params.caseId)) return res.status(400).json({ error: 'invalid_case_id' });
     try {
+      for (const analysis of listCaseAnalyses(db, req.params.caseId)) {
+        if (analysis.status === 'running' && (analysis.completionPending || volatileCompletionResults.has(analysis.id))) retryCompletion(analysis.id);
+      }
       const item = getCase(db, req.params.caseId);
       if (!item) return res.status(404).json({ error: 'case_not_found' });
+      item.analyses = item.analyses.map((analysis) => ({
+        ...analysis,
+        completionPending: analysis.completionPending || volatileCompletionResults.has(analysis.id),
+      }));
       res.json({ case: item });
     } catch {
       res.status(500).json({ error: 'case_detail_unavailable' });
@@ -234,8 +277,13 @@ export function createApp({ db, buildDirectory = defaultBuildDirectory, analyze 
   app.get('/api/analyses/:analysisId', (req, res) => {
     if (!caseIdPattern.test(req.params.analysisId)) return res.status(400).json({ error: 'invalid_analysis_id' });
     try {
-      const analysis = getAnalysis(db, req.params.analysisId);
+      let analysis = getAnalysis(db, req.params.analysisId);
       if (!analysis) return res.status(404).json({ error: 'analysis_not_found' });
+      if (analysis.status === 'running' && (analysis.completionPending || volatileCompletionResults.has(analysis.id))) {
+        retryCompletion(analysis.id);
+        analysis = getAnalysis(db, req.params.analysisId);
+      }
+      analysis.completionPending = analysis.completionPending || volatileCompletionResults.has(analysis.id);
       res.json({ analysis });
     } catch {
       res.status(500).json({ error: 'analysis_unavailable' });
@@ -256,16 +304,21 @@ export function createApp({ db, buildDirectory = defaultBuildDirectory, analyze 
       const requestKey = req.get('idempotency-key');
       validateRequestKey(requestKey);
       const payload = validateAnalysisBody(req.body);
-      if (payload.source === 'live' && !analyze) return res.status(503).json({ error: 'live_inference_unavailable' });
       const result = runIdempotentMutation(
         db,
         { requestKey, method: req.method, route: req.path, caseId: req.params.caseId, payload, expectedVersion: payload.expectedVersion },
-        (connection) => reserveAnalysis(connection, {
-          caseId: req.params.caseId,
-          source: payload.source,
-          fixtureId: payload.fixtureId,
-          promptVersion: analysisPromptVersion,
-        }),
+        (connection) => {
+          if (payload.source === 'live' && !analyze) throw new LiveInferenceUnavailableError();
+          return reserveAnalysis(connection, {
+            caseId: req.params.caseId,
+            source: payload.source,
+            fixtureId: payload.fixtureId,
+            promptVersion: analysisPromptVersion,
+            provider: analyze?.provider || null,
+            requestedModel: analyze?.requestedModel || null,
+            buildRequestEnvelope: analyze?.buildRequestEnvelope || null,
+          });
+        },
       );
       if (payload.source === 'live' && !result.replayed) {
         const analysisId = result.response.analysisId;
@@ -273,14 +326,20 @@ export function createApp({ db, buildDirectory = defaultBuildDirectory, analyze 
           try {
             const snapshot = getAnalysis(db, analysisId);
             if (!snapshot || snapshot.status !== 'running') return;
-            const inference = await analyze(snapshot.context);
-            finishAnalysis(db, { analysisId, result: inference });
-          } catch {
+            let inference;
             try {
-              finishAnalysis(db, { analysisId, result: { status: 'failed', failureCode: 'provider_unavailable', provider: 'openai' } });
+              inference = await analyze(snapshot.context, snapshot.requestEnvelope);
             } catch {
-              // A persistent database failure leaves the durable reservation for startup recovery.
+              inference = {
+                status: 'failed',
+                failureCode: 'provider_unavailable',
+                ...(analyze.provider ? { provider: analyze.provider } : {}),
+                ...(analyze.requestedModel ? { requestedModel: analyze.requestedModel } : {}),
+              };
             }
+            persistInferenceResult(analysisId, inference);
+          } catch {
+            // A successful provider result is staged separately before terminal persistence.
           }
         });
       }

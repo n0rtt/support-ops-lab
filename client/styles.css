@@ -276,6 +276,16 @@ blockquote { margin: 0; padding: 16px 18px; border-left: 3px solid #73bdb2; bord
 .review-edit-form { display: grid; gap: 8px; padding: 12px; border: 1px solid var(--line); border-radius: 8px; background: #f8fbfb; }
 .analysis-review-controls > label, .review-edit-form label { color: #344c59; font-size: 0.84rem; font-weight: 650; }
 .analysis-review-controls textarea, .review-edit-form textarea { width: 100%; min-height: 76px; padding: 9px 10px; border: 1px solid #b8c6cd; border-radius: 7px; color: inherit; font: inherit; }
+.review-structured-editor { display: grid; gap: 12px; }
+.review-structured-editor > label { display: grid; gap: 6px; }
+.review-structured-editor select { min-height: 40px; padding: 8px 10px; border: 1px solid #b8c6cd; border-radius: 7px; color: inherit; background: #fff; font: inherit; }
+.review-structured-editor fieldset { display: grid; gap: 8px; min-width: 0; margin: 0; padding: 10px; border: 1px solid var(--line); border-radius: 7px; }
+.review-structured-editor legend { padding: 0 4px; color: #344c59; font-size: 0.84rem; font-weight: 700; }
+.review-observation { display: grid; gap: 8px; padding: 9px; border: 1px solid #d9e1e5; border-radius: 7px; background: #fff; }
+.review-reference-picker { grid-template-columns: repeat(auto-fit, minmax(210px, 1fr)); }
+.review-reference-picker label { display: flex; align-items: flex-start; gap: 6px; overflow-wrap: anywhere; font-weight: 500; }
+.review-reference-picker input { flex: 0 0 auto; margin-top: 3px; }
+.review-structured-editor button { justify-self: start; }
 .analysis-review-controls .reject-button { color: #883b43; border-color: #e2b9bc; }
 .reviewed-draft-actions { display: grid; gap: 8px; padding: 12px; border: 1px solid #b8dcd5; border-radius: 8px; background: #f1faf7; }
 .reviewed-draft-actions p { margin: 0; color: #24574f; font-size: 0.84rem; line-height: 1.5; }

@@ -2,6 +2,7 @@ import assert from 'node:assert/strict';
 import { test } from 'node:test';
 import {
   AnalysisContextTooLargeError,
+  AnalysisContextIntegrityError,
   AnalysisInProgressError,
   UnsupportedAnalysisReferencesError,
   appendAnalysisReview,
@@ -16,10 +17,13 @@ import {
   listReviewQuality,
   openDatabase,
   recoverInterruptedAnalyses,
+  recoverPendingAnalysisCompletions,
   reserveAnalysis,
   runIdempotentMutation,
+  stageAnalysisResult,
 } from '../server/database.js';
 import { analysisFixtures } from '../fixtures/analyses.js';
+import { validateRecommendation } from '../shared/recommendation.js';
 import { temporaryDatabase } from './helpers.js';
 
 function mutation(db, { key, caseId, route, payload }, mutate) {
@@ -170,6 +174,24 @@ test('analysis reservation is atomic, idempotent, snapshot-isolated, and late re
   }).applied, false);
   assert.deepEqual(getAnalysis(db, completed.id).recommendation, originalRecommendation);
 
+  const corrected = structuredClone(originalRecommendation);
+  corrected.classification = 'authentication';
+  corrected.possibleCause = { text: 'The supplied 401 responses indicate rejected authentication.', references: [{ kind: 'diagnostic', id: 'DIAG-AUTH-401-001' }] };
+  corrected.observations = corrected.observations.map((item) => ({
+    ...item,
+    references: item.references.filter((reference) => reference.id !== 'DIAG-WH-INV-001'),
+  }));
+  corrected.references = corrected.references.filter((reference) => reference.id !== 'DIAG-WH-INV-001');
+  const currentCase = getCase(db, 'SEW-1001');
+  const correctedReview = runIdempotentMutation(db, {
+    requestKey: 'correct-unsupported-output', method: 'POST',
+    route: `/api/cases/SEW-1001/analyses/${completed.id}/reviews`, caseId: 'SEW-1001',
+    payload: { decision: 'edit', recommendation: corrected, expectedVersion: currentCase.version }, expectedVersion: currentCase.version,
+  }, (connection) => appendAnalysisReview(connection, { caseId: 'SEW-1001', analysisId: completed.id, decision: 'edit', recommendation: corrected }));
+  assert.equal(correctedReview.response.decision, 'edited');
+  assert.equal(getAnalysis(db, completed.id).latestReview.recommendation.classification, 'authentication');
+  assert.deepEqual(getAnalysis(db, completed.id).recommendation, originalRecommendation);
+
   const current = getCase(db, 'SEW-1001');
   const next = reserveLive(db, current.id, 'deliberate-reanalysis', current.version);
   assert.equal(getAnalysis(db, next.response.analysisId).context.correctiveFeedback[0].feedback, rejectPayload.feedback);
@@ -195,6 +217,58 @@ test('analysis reservation is atomic, idempotent, snapshot-isolated, and late re
   }).applied, false);
   assert.equal(db.prepare('SELECT COUNT(*) AS count FROM analyses').get().count, 0);
   assert.deepEqual(db.prepare('PRAGMA foreign_key_check').all(), []);
+});
+
+test('terminal persistence failure keeps a staged result recoverable without another inference', (t) => {
+  const { databasePath } = temporaryDatabase(t);
+  const db = openDatabase(databasePath);
+  initializeDatabase(db);
+  t.after(() => db.close());
+  const current = getCase(db, 'SEW-1001');
+  const reservation = reserveLive(db, current.id, 'stage-result-before-terminal', current.version);
+  const result = {
+    status: 'completed', recommendation: analysisFixtures[0].recommendation,
+    provider: 'openai', requestedModel: 'gpt-6.1-sol', returnedModel: 'gpt-6.1-sol', responseId: 'resp_staged_result',
+  };
+  assert.equal(stageAnalysisResult(db, { analysisId: reservation.response.analysisId, result }).applied, true);
+  db.exec("CREATE TRIGGER fail_terminal_analysis BEFORE UPDATE OF status ON analyses WHEN NEW.status <> OLD.status BEGIN SELECT RAISE(ABORT, 'injected terminal write failure'); END");
+  assert.throws(() => finishAnalysis(db, { analysisId: reservation.response.analysisId }));
+  assert.equal(getAnalysis(db, reservation.response.analysisId).completionPending, true);
+  assert.deepEqual(recoverInterruptedAnalyses(db), []);
+  db.exec('DROP TRIGGER fail_terminal_analysis');
+  assert.deepEqual(recoverPendingAnalysisCompletions(db), [reservation.response.analysisId]);
+  const recovered = getAnalysis(db, reservation.response.analysisId);
+  assert.equal(recovered.status, 'completed');
+  assert.equal(recovered.recommendation.classification, 'other');
+  assert.equal(recovered.responseId, 'resp_staged_result');
+});
+
+test('context integrity rejects stale cross-organization evidence without a receipt', (t) => {
+  const { databasePath } = temporaryDatabase(t);
+  const db = openDatabase(databasePath);
+  initializeDatabase(db);
+  t.after(() => db.close());
+  const current = getCase(db, 'SEW-1001');
+  db.prepare('UPDATE cases SET organization_id = ? WHERE id = ?').run('ORG-CHANGED', current.id);
+  const payload = { source: 'live', expectedVersion: current.version };
+  assert.throws(() => runIdempotentMutation(db, {
+    requestKey: 'reject-cross-organization-context', method: 'POST', route: '/api/cases/SEW-1001/analyses',
+    caseId: current.id, payload, expectedVersion: current.version,
+  }, (connection) => reserveAnalysis(connection, { caseId: current.id, source: 'live' })), AnalysisContextIntegrityError);
+  assert.equal(db.prepare('SELECT COUNT(*) AS count FROM analyses').get().count, 0);
+  assert.equal(db.prepare('SELECT COUNT(*) AS count FROM mutation_receipts').get().count, 0);
+});
+
+test('recommendation semantic validation rejects whitespace while allowing empty observations and nullable causes', () => {
+  const valid = structuredClone(analysisFixtures[2].recommendation);
+  assert.equal(validateRecommendation(valid).success, true);
+  for (const invalid of [
+    { ...valid, draftResponse: '   ' },
+    { ...valid, nextSteps: ['\t'] },
+    { ...valid, uncertainty: ['  '] },
+    { ...valid, observations: [{ text: ' ', references: [] }] },
+    { ...valid, possibleCause: { text: '\n', references: [] } },
+  ]) assert.equal(validateRecommendation(invalid).success, false);
 });
 
 test('analyses remain in creation order when timestamps are equal', (t) => {
