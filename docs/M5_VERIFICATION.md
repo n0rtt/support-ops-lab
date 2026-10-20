@@ -41,12 +41,14 @@ After `npm run db:init` and `npm run build`, a normal `npm start` process with n
 
 After confirming restart persistence, the persistent server was stopped. `npm run demo:reset -- --confirm` was run four times only while no application server was running: before the A test, between A and B, between B and C, and once at the end to leave the disposable database at its baseline. Each reset restored the synthetic baseline. The browser tests themselves used isolated temporary databases and fresh contexts. This establishes offline local persistence; restart persistence of the unavailable M4 live-specific record was not exercised.
 
+The persistent-process check was repeated on follow-up head `215edcda4155042275940f864bfe50a77a64a32f`: after the no-key A flow, the server was stopped and restarted against the same `data/supportops.sqlite` without reset or initialization between processes. A new Chromium context and the API confirmed resolved status, both original fixture outputs and `rejected`/`edited` review decisions, all three diagnostic links, the simulated reply, the honest outcome, and eight chronological activities. Afterward the server was stopped and the disposable database reset to its synthetic baseline.
+
 ## Keyboard, readability, browser, and layout checks
 
 - The Chromium E2E checks verify associated labels on visible form controls, a visible 3px keyboard focus outline, Enter activation of the fixture button, and visible `Saved.` status feedback. A rendered-page inspection found no unlabeled input, textarea, or select controls.
 - Computed Chromium text contrast for representative visible elements: case heading `14.55:1`; activity text `9.04:1`; form label `6.62:1`; primary action button `6.05:1`. These are targeted samples, not a full accessibility audit.
 - Responsive reflow had no document overflow at 1440, 720, 360, or 320 CSS-pixel viewport widths. The layout E2E opens the structured editor at 360px, verifies each supplied-reference label stays within its fieldset, repeats the containment and document-overflow checks at 320px, then saves an edited recommendation with Enter and verifies its `Edited` status. The 720px case is a 200%-zoom-equivalent viewport starting from 1440 CSS pixels; native browser zoom controls were not changed.
-- A practical Firefox `155.0` smoke loaded `SEW-1001`, confirmed its three diagnostic rows and no-key fixture flow, and found no horizontal overflow at 720px. The full browser suite ran in Chromium `153.0.8010.12`; Firefox did not run the full suite.
+- A practical Firefox `155.0` smoke loaded `SEW-1001`, confirmed its three diagnostic rows and no-key fixture flow, and found no horizontal overflow at 720px. On the follow-up head, Firefox also opened the structured editor at 360px, checked reference-label containment and document overflow at 360px and 320px, and keyboard-saved an edited review with visible `Edited` feedback. The full browser suite ran in Chromium `153.0.8010.12`; Firefox did not run the full suite.
 
 ## Screenshot provenance
 
