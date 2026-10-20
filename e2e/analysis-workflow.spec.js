@@ -1,5 +1,6 @@
 import { expect, test } from '@playwright/test';
 import { withFreshApp } from './support.js';
+import { analysisFixtures } from '../fixtures/analyses.js';
 
 test('A shows the intentionally incorrect offline diagnosis, records a correction, and reuses it as context', async ({ browser }, testInfo) => {
   await withFreshApp(browser, async (page, baseUrl) => {
@@ -72,6 +73,53 @@ test('A can correct structured diagnosis and supplied references while preservin
     await expect(reloaded).toContainText('rejected authentication');
     await expect(reloaded).toContainText('knowledge · KB-OUTAGE-01');
     await expect(reloaded).toContainText(originalHypothesis);
+  });
+});
+
+test('quarantined output can be rejected but not accepted, edited into approval, or reused', async ({ browser }) => {
+  const invalidRecommendation = structuredClone(analysisFixtures[2].recommendation);
+  invalidRecommendation.references.push({ kind: 'diagnostic', id: 'DIAG-AUTH-401-001' });
+  await withFreshApp(browser, async (page, baseUrl) => {
+    await page.goto(baseUrl + '/#SEW-1003');
+    await page.getByRole('button', { name: 'Generate live analysis' }).click();
+    const analysis = page.locator('.analysis-card').first();
+    await expect(analysis).toContainText('This original output is quarantined');
+    await expect(analysis.getByRole('button', { name: 'Accept recommendation' })).toBeDisabled();
+    await expect(analysis.getByRole('button', { name: 'Edit draft and approve' })).toBeDisabled();
+    await expect(analysis.getByRole('button', { name: /Use reviewed draft/ })).toHaveCount(0);
+    await analysis.getByLabel('Reason or corrective feedback').fill('This case supplied no diagnostic evidence; request the exact request ID and time window.');
+    await analysis.getByRole('button', { name: 'Reject recommendation and record correction' }).click();
+    await expect(analysis).toContainText('Rejected');
+    await expect(analysis).toContainText('This case supplied no diagnostic evidence');
+    const { case: saved } = await (await page.request.get(baseUrl + '/api/cases/SEW-1003')).json();
+    expect(saved.analyses[0].latestReview.decision).toBe('rejected');
+  }, { analyze: async () => ({
+    status: 'completed', recommendation: invalidRecommendation, provider: 'openai', requestedModel: 'test-model',
+  }) });
+});
+
+test('failed result staging is described as temporary and never as saved', async ({ browser }) => {
+  let db;
+  await withFreshApp(browser, async (page, baseUrl) => {
+    await page.goto(baseUrl + '/#SEW-1003');
+    await page.getByRole('button', { name: 'Generate live analysis' }).click();
+    const analysis = page.locator('.analysis-card').first();
+    await expect(analysis).toContainText('The provider result was received but could not be saved durably');
+    await expect(analysis).toContainText('could be lost if the process stops');
+    await expect(analysis).not.toContainText('provider result is saved');
+    const { case: saved } = await (await page.request.get(baseUrl + '/api/cases/SEW-1003')).json();
+    expect(saved.analyses[0].completionPending).toBe(false);
+    expect(saved.analyses[0].volatileCompletionPending).toBe(true);
+    expect(db.prepare('SELECT pending_result_json, output_json FROM analyses WHERE id = ?').get(saved.analyses[0].id)).toEqual({ pending_result_json: null, output_json: null });
+
+    db.exec('DROP TRIGGER fail_result_staging');
+    await expect(analysis.locator('.analysis-state-completed')).toBeVisible();
+    expect(db.prepare('SELECT status, pending_result_json FROM analyses WHERE id = ?').get(saved.analyses[0].id)).toMatchObject({ status: 'completed', pending_result_json: null });
+  }, { analyze: async () => ({
+    status: 'completed', recommendation: analysisFixtures[2].recommendation, provider: 'openai', requestedModel: 'test-model',
+  }) }, (database) => {
+    db = database;
+    db.exec("CREATE TRIGGER fail_result_staging BEFORE UPDATE OF pending_result_json ON analyses WHEN NEW.pending_result_json IS NOT NULL BEGIN SELECT RAISE(ABORT, 'injected staging failure'); END");
   });
 });
 

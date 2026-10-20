@@ -183,13 +183,13 @@ test('analysis reservation is atomic, idempotent, snapshot-isolated, and late re
   }));
   corrected.references = corrected.references.filter((reference) => reference.id !== 'DIAG-WH-INV-001');
   const currentCase = getCase(db, 'SEW-1001');
-  const correctedReview = runIdempotentMutation(db, {
+  assert.throws(() => runIdempotentMutation(db, {
     requestKey: 'correct-unsupported-output', method: 'POST',
     route: `/api/cases/SEW-1001/analyses/${completed.id}/reviews`, caseId: 'SEW-1001',
     payload: { decision: 'edit', recommendation: corrected, expectedVersion: currentCase.version }, expectedVersion: currentCase.version,
-  }, (connection) => appendAnalysisReview(connection, { caseId: 'SEW-1001', analysisId: completed.id, decision: 'edit', recommendation: corrected }));
-  assert.equal(correctedReview.response.decision, 'edited');
-  assert.equal(getAnalysis(db, completed.id).latestReview.recommendation.classification, 'authentication');
+  }, (connection) => appendAnalysisReview(connection, { caseId: 'SEW-1001', analysisId: completed.id, decision: 'edit', recommendation: corrected })), UnsupportedAnalysisReferencesError);
+  assert.equal(db.prepare('SELECT COUNT(*) AS count FROM mutation_receipts WHERE request_key = ?').get('correct-unsupported-output').count, 0);
+  assert.equal(getAnalysis(db, completed.id).latestReview.decision, 'rejected');
   assert.deepEqual(getAnalysis(db, completed.id).recommendation, originalRecommendation);
 
   const current = getCase(db, 'SEW-1001');
@@ -217,6 +217,38 @@ test('analysis reservation is atomic, idempotent, snapshot-isolated, and late re
   }).applied, false);
   assert.equal(db.prepare('SELECT COUNT(*) AS count FROM analyses').get().count, 0);
   assert.deepEqual(db.prepare('PRAGMA foreign_key_check').all(), []);
+});
+
+test('analysis context keeps every operator outcome until the explicit size limit', (t) => {
+  const { databasePath } = temporaryDatabase(t);
+  const db = openDatabase(databasePath);
+  initializeDatabase(db);
+  t.after(() => db.close());
+
+  const caseId = 'SEW-1003';
+  for (let index = 0; index < 21; index += 1) {
+    let item = getCase(db, caseId);
+    const findings = index === 0 ? 'Important early finding retained for later analysis.' : `Finding ${index + 1}.`;
+    const escalation = { status: 'escalated', reason: 'Investigation review', findings, questions: '', evidenceIds: [], expectedVersion: item.version };
+    mutation(db, {
+      key: `history-escalate-${index}`, caseId, route: `/api/cases/${caseId}/status`, payload: escalation,
+    }, (connection) => changeCaseStatus(connection, {
+      caseId, status: 'escalated', context: { reason: escalation.reason, findings, questions: '', evidenceIds: [] },
+    }));
+    if (index < 20) {
+      item = getCase(db, caseId);
+      const resume = { status: 'in_progress', expectedVersion: item.version };
+      mutation(db, {
+        key: `history-resume-${index}`, caseId, route: `/api/cases/${caseId}/status`, payload: resume,
+      }, (connection) => changeCaseStatus(connection, { caseId, status: 'in_progress' }));
+    }
+  }
+
+  const reservation = reserveLive(db, caseId, 'context-with-all-outcomes', getCase(db, caseId).version);
+  const context = getAnalysis(db, reservation.response.analysisId).context;
+  assert.equal(context.operatorHistory.length, 21);
+  assert.equal(context.operatorHistory[0].findings, 'Important early finding retained for later analysis.');
+  assert.ok(Buffer.byteLength(JSON.stringify(context)) < 100 * 1024);
 });
 
 test('terminal persistence failure keeps a staged result recoverable without another inference', (t) => {

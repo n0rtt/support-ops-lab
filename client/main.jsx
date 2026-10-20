@@ -985,7 +985,7 @@ function App() {
   function useReviewedDraft(analysis, replace) {
     const reviewSlot = activeCase?.id + ':review:' + analysis.id;
     const replySlot = activeCase?.id + ':activity:simulated_reply';
-    if (!['accepted', 'edited'].includes(analysis.latestReview?.decision) || !analysis.latestReview?.recommendation || busySlot || pendingRequests[reviewSlot] || pendingRequests[replySlot]) return false;
+    if (analysis.referenceValidation?.valid === false || !['accepted', 'edited'].includes(analysis.latestReview?.decision) || !analysis.latestReview?.recommendation || busySlot || pendingRequests[reviewSlot] || pendingRequests[replySlot]) return false;
     if (replace || !(selectedDraft.replyText || '').trim()) updateDraft(activeCase.id, 'replyText', analysis.latestReview.recommendation.draftResponse);
     return true;
   }
@@ -1298,7 +1298,7 @@ function App() {
                       const reviewDraftValid = validateRecommendation(reviewDraft).success;
                       const reviewFeedback = selectedDraft.reviewFeedbackByAnalysis?.[analysis.id] || '';
                       const detail = analysisDetails[analysis.id];
-                      const approved = ['accepted', 'edited'].includes(analysis.latestReview?.decision) && analysis.latestReview?.recommendation;
+                      const approved = analysis.referenceValidation?.valid !== false && ['accepted', 'edited'].includes(analysis.latestReview?.decision) && analysis.latestReview?.recommendation;
                       const replyDraftExists = Boolean((selectedDraft.replyText || '').trim());
                       const replySlot = activeCase.id + ':activity:simulated_reply';
                       const replyPending = pendingRequests[replySlot];
@@ -1323,8 +1323,10 @@ function App() {
                             <RecommendationContent analysis={analysis} onInspectReference={inspectReference} />
                           </>}
                           {analysis.status === 'running' && (analysis.completionPending
-                            ? <p className="notice notice-error" role="status">The provider result is saved, but its completion write is pending. Refreshing retries persistence only; it will not send another inference.</p>
-                            : <p role="status">Waiting for the configured model response. Refreshing this page will not resend it.</p>)}
+                            ? <p className="notice notice-error" role="status">The provider result is durably staged, but its completion write is pending. Refreshing retries persistence only; it will not send another inference.</p>
+                            : analysis.volatileCompletionPending
+                              ? <p className="notice notice-error" role="status">The provider result was received but could not be saved durably. It is held temporarily in this server process and could be lost if the process stops. Refreshing retries the save without sending another inference.</p>
+                              : <p role="status">Waiting for the configured model response. Refreshing this page will not resend it.</p>)}
                           {analysis.status !== 'completed' && analysis.status !== 'running' && <p className="analysis-failure" role="status">No recommendation was saved ({analysis.failureCode || analysis.status}). Review the failure, then deliberately start a new analysis if appropriate.</p>}
                           <button type="button" onClick={() => inspectAnalysis(analysis.id)} disabled={detail?.state === 'loading'}>Inspect saved context</button>
                           {detail?.state === 'loading' && <p role="status">Loading saved context…</p>}
@@ -1346,16 +1348,16 @@ function App() {
                           </section>}
                           {analysis.status === 'completed' && analysis.recommendation && <section className="analysis-review-controls" aria-label={'Review ' + analysis.id}>
                             <h5>Human review</h5>
-                            {unsupported && <p className="notice notice-error" role="alert">This output cannot be accepted or reused because it cites data outside the saved context. Edit the structured recommendation to remove unsupported references, or reject it with corrective feedback.</p>}
+                            {unsupported && <p className="notice notice-error" role="alert">This original output is quarantined because it cites data outside the saved context. Acceptance, edited approval, and reviewed-draft reuse are blocked. Reject it with corrective feedback, then reanalyze.</p>}
                             <div className="review-buttons">
                               <button type="button" onClick={() => submitReview(analysis, 'accept')} disabled={unsupported || Boolean(busySlot) || Boolean(reviewPending)}>Accept recommendation</button>
-                              <button type="button" onClick={() => toggleReviewEditor(analysis)} disabled={Boolean(busySlot) || Boolean(reviewPending)}>
+                              <button type="button" onClick={() => toggleReviewEditor(analysis)} disabled={unsupported || Boolean(busySlot) || Boolean(reviewPending)}>
                                 {editingAnalysisId === analysis.id ? 'Close edit' : 'Edit draft and approve'}
                               </button>
                             </div>
                             {reviewVersionNeedsReconcile && <p className="notice notice-error" role="alert">This saved review draft has no captured case version. Reconcile it explicitly before submitting.</p>}
                             {reviewVersionNeedsReconcile && <button type="button" onClick={() => setReviewExpectedVersion(activeCase.id, analysis.id, activeCase.version)} disabled={Boolean(busySlot) || Boolean(reviewPending)}>Reconcile saved review draft with case version {activeCase.version}</button>}
-                            {editingAnalysisId === analysis.id && <div className="review-edit-form">
+                            {editingAnalysisId === analysis.id && !unsupported && <div className="review-edit-form">
                               <RecommendationEditor recommendation={reviewDraft} allowlist={analysis.referenceAllowlist} onChange={(value) => updateReviewDraft(activeCase.id, 'reviewRecommendationByAnalysis', analysis.id, value)} />
                               {!reviewDraftValid && <p className="notice notice-error" role="alert">Complete each required structured field with nonblank text before approval.</p>}
                               <button type="button" onClick={() => submitReview(analysis, 'edit')} disabled={!reviewDraftValid || reviewVersionNeedsReconcile || Boolean(busySlot) || Boolean(reviewPending)}>Save edited recommendation as approved</button>

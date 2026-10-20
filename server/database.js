@@ -435,7 +435,6 @@ function buildAnalysisContext(db, caseId) {
   }));
   const operatorHistory = item.activities
     .filter((activity) => activity.type === 'status_changed' && ['escalated', 'resolved'].includes(activity.payload.to))
-    .slice(-20)
     .map((activity) => ({
       id: activity.id,
       createdAt: activity.createdAt,
@@ -669,7 +668,7 @@ export function appendAnalysisReview(db, { caseId, analysisId, decision, recomme
   if (row.status !== 'completed') throw new AnalysisNotReadyError();
   const original = JSON.parse(row.output_json);
   const originalValidation = JSON.parse(row.reference_validation_json);
-  if (decision === 'accept' && !originalValidation.valid) {
+  if (decision !== 'reject' && !originalValidation.valid) {
     throw new UnsupportedAnalysisReferencesError(originalValidation.unsupportedReferences);
   }
 

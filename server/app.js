@@ -266,7 +266,7 @@ export function createApp({ db, buildDirectory = defaultBuildDirectory, analyze 
       if (!item) return res.status(404).json({ error: 'case_not_found' });
       item.analyses = item.analyses.map((analysis) => ({
         ...analysis,
-        completionPending: analysis.completionPending || volatileCompletionResults.has(analysis.id),
+        volatileCompletionPending: volatileCompletionResults.has(analysis.id),
       }));
       res.json({ case: item });
     } catch {
@@ -283,7 +283,7 @@ export function createApp({ db, buildDirectory = defaultBuildDirectory, analyze 
         retryCompletion(analysis.id);
         analysis = getAnalysis(db, req.params.analysisId);
       }
-      analysis.completionPending = analysis.completionPending || volatileCompletionResults.has(analysis.id);
+      analysis.volatileCompletionPending = volatileCompletionResults.has(analysis.id);
       res.json({ analysis });
     } catch {
       res.status(500).json({ error: 'analysis_unavailable' });

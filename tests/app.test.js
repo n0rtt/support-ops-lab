@@ -3,7 +3,7 @@ import { createServer, request } from 'node:http';
 import { test } from 'node:test';
 import { createApp } from '../server/app.js';
 import { createOpenAIAnalyzer } from '../server/ai.js';
-import { initializeDatabase, openDatabase } from '../server/database.js';
+import { initializeDatabase, openDatabase, recoverInterruptedAnalyses } from '../server/database.js';
 import { analysisFixtures } from '../fixtures/analyses.js';
 import { temporaryDatabase } from './helpers.js';
 
@@ -804,7 +804,7 @@ test('live analysis reservation is durable and idempotent, rejects unsupported r
   let signalStarted;
   const started = new Promise((resolve) => { signalStarted = resolve; });
   let calls = 0;
-  const { baseUrl } = await testServer(t, {
+  const { baseUrl, db } = await testServer(t, {
     analyze: async () => {
       calls += 1;
       if (calls === 1) {
@@ -857,6 +857,15 @@ test('live analysis reservation is durable and idempotent, rejects unsupported r
   response = await postReview(baseUrl, caseA.id, analysis.id, 'bad-reference-accept', { decision: 'accept', expectedVersion: updated.version });
   assert.equal(response.status, 409);
   assert.deepEqual((await response.json()).error, 'unsupported_references');
+  const correctedRecommendation = structuredClone(analysisFixtures[0].recommendation);
+  correctedRecommendation.classification = 'authentication';
+  const correctedCopy = await postReview(baseUrl, caseA.id, analysis.id, 'bad-reference-edited-approval', {
+    decision: 'edit', expectedVersion: updated.version, recommendation: correctedRecommendation,
+  });
+  assert.equal(correctedCopy.status, 409);
+  assert.deepEqual((await correctedCopy.json()).error, 'unsupported_references');
+  assert.equal(db.prepare('SELECT COUNT(*) AS count FROM mutation_receipts WHERE request_key = ?').get('bad-reference-edited-approval').count, 0);
+  assert.equal((await (await fetch(baseUrl + '/api/analyses/' + analysis.id)).json()).analysis.reviews.length, 0);
   response = await postReview(baseUrl, caseA.id, analysis.id, 'bad-reference-reject', {
     decision: 'reject', expectedVersion: updated.version,
     feedback: 'This diagnostic exists but was not supplied to the analysis. It cannot support the recommendation.',
@@ -920,11 +929,22 @@ test('live refusal, incomplete, timeout, and malformed-output results become dur
 
 test('analysis context over 100 KiB is rejected without a durable reservation', async (t) => {
   const { baseUrl, db } = await testServer(t, { analyze: async () => ({ status: 'failed', failureCode: 'not_expected' }) });
-  const insert = db.prepare('INSERT INTO activities (id, case_id, created_at, activity_type, payload, sequence) VALUES (?, ?, ?, ?, ?, ?)');
-  for (let i = 0; i < 11; i += 1) {
-    insert.run('ACT-LARGE-' + i, 'SEW-1001', `2026-10-20T12:00:${String(i).padStart(2, '0')}.000Z`, 'internal_note', JSON.stringify({ text: 'x'.repeat(10000) }), 3 + i);
+  const findings = 'x'.repeat(10000);
+  let current = (await detail(baseUrl, 'SEW-1001')).case;
+  for (let index = 0; index < 11; index += 1) {
+    let response = await patchStatus(baseUrl, 'SEW-1001', 'oversized-escalate-' + index, {
+      status: 'escalated', reason: 'Investigation review', findings, questions: '', evidenceIds: [], expectedVersion: current.version,
+    });
+    assert.equal(response.status, 200);
+    current = (await detail(baseUrl, 'SEW-1001')).case;
+    if (index < 10) {
+      response = await patchStatus(baseUrl, 'SEW-1001', 'oversized-resume-' + index, {
+        status: 'in_progress', expectedVersion: current.version,
+      });
+      assert.equal(response.status, 200);
+      current = (await detail(baseUrl, 'SEW-1001')).case;
+    }
   }
-  const current = (await detail(baseUrl, 'SEW-1001')).case;
   const response = await postAnalysis(baseUrl, 'SEW-1001', 'oversized-context', {
     source: 'live', expectedVersion: current.version,
   });
@@ -1000,6 +1020,50 @@ test('terminal write failure is visible and polling recovers the staged result w
   const recovered = (await (await fetch(baseUrl + '/api/cases/SEW-1001')).json()).case.analyses.find((item) => item.id === ack.analysisId);
   assert.equal(recovered.status, 'completed');
   assert.equal(recovered.completionPending, false);
+  assert.equal(calls, 1);
+});
+
+test('failed result staging is reported as volatile and a restart interrupts without replaying inference', async (t) => {
+  let calls = 0;
+  const { databasePath } = temporaryDatabase(t);
+  let db = openDatabase(databasePath);
+  initializeDatabase(db);
+  let running;
+  t.after(async () => { await running?.close(); db.close(); });
+  db.exec("CREATE TRIGGER fail_result_staging BEFORE UPDATE OF pending_result_json ON analyses WHEN NEW.pending_result_json IS NOT NULL BEGIN SELECT RAISE(ABORT, 'injected staging failure'); END");
+
+  running = await listen(db, { analyze: async () => {
+    calls += 1;
+    return { status: 'completed', recommendation: analysisFixtures[2].recommendation, provider: 'openai', requestedModel: 'gpt-6.1-sol' };
+  } });
+  const current = (await detail(running.baseUrl, 'SEW-1003')).case;
+  const response = await postAnalysis(running.baseUrl, 'SEW-1003', 'failed-result-staging', {
+    source: 'live', expectedVersion: current.version,
+  });
+  assert.equal(response.status, 202);
+  const { analysisId } = await response.json();
+  let analysis;
+  for (let attempt = 0; attempt < 50; attempt += 1) {
+    analysis = (await (await fetch(running.baseUrl + '/api/analyses/' + analysisId)).json()).analysis;
+    if (analysis.volatileCompletionPending) break;
+    await new Promise((resolve) => setTimeout(resolve, 5));
+  }
+  assert.equal(analysis.status, 'running');
+  assert.equal(analysis.completionPending, false);
+  assert.equal(analysis.volatileCompletionPending, true);
+  assert.equal(db.prepare('SELECT pending_result_json FROM analyses WHERE id = ?').get(analysisId).pending_result_json, null);
+  assert.equal(db.prepare('SELECT output_json FROM analyses WHERE id = ?').get(analysisId).output_json, null);
+  assert.equal(calls, 1);
+
+  await running.close();
+  db.exec('DROP TRIGGER fail_result_staging');
+  assert.deepEqual(recoverInterruptedAnalyses(db), [analysisId]);
+  running = await listen(db);
+  const restarted = (await (await fetch(running.baseUrl + '/api/analyses/' + analysisId)).json()).analysis;
+  assert.equal(restarted.status, 'interrupted');
+  assert.equal(restarted.completionPending, false);
+  assert.equal(restarted.volatileCompletionPending, false);
+  assert.equal(restarted.recommendation, null);
   assert.equal(calls, 1);
 });
 
