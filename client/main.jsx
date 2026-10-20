@@ -734,6 +734,7 @@ function App() {
                     <label htmlFor="diagnostic-query">Search globally by exact request ID, event ID, or diagnostic row ID</label>
                     <div><input id="diagnostic-query" type="search" maxLength={200} value={diagnosticQuery} onChange={(event) => setDiagnosticQuery(event.target.value)} />
                       <button type="submit" disabled={diagnosticSearchState === 'loading'}>Search diagnostics</button></div>
+                    <p className="field-hint"><strong>Synthetic demo search IDs.</strong> These are fictional seeded identifiers for demonstration, not identifiers supplied by the customer: <code>evt_subscription_480</code> (subscription webhook attempts); <code>evt_invoice_731</code> (invoice webhook attempts).</p>
                     <p className="field-hint">Search is global and may show other organizations. A result is not linked until you explicitly associate its selected row IDs.</p>
                   </form>
                   {diagnosticSearchError && <p className="notice notice-error" role="alert">{diagnosticSearchError}</p>}

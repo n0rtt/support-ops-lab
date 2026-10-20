@@ -261,6 +261,11 @@ test('a late save refresh respects the current status filter', async ({ page }) 
 
 test('B search shows organization-scoped history and supports safe linking and evidence-backed escalation', async ({ page }) => {
   await page.goto('/#SEW-1002');
+  const demoIds = page.locator('.diagnostic-search-form p.field-hint').first();
+  await expect(demoIds).toBeVisible();
+  await expect(demoIds).toContainText('fictional seeded identifiers for demonstration, not identifiers supplied by the customer');
+  await expect(demoIds).toContainText('evt_subscription_480');
+  await expect(demoIds).toContainText('evt_invoice_731');
   const note = page.getByLabel('Visible to support operators only');
   await note.fill('Preserve B context while inspecting diagnostics.');
   await page.locator('#diagnostic-query').fill('evt_subscription_480');
