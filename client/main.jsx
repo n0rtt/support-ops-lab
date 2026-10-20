@@ -293,6 +293,7 @@ function App() {
       return;
     }
     const request = ++diagnosticSearchRequestRef.current;
+    diagnosticDetailRequestRef.current += 1;
     setDiagnosticSearchState('loading');
     setDiagnosticSearchError('');
     setDiagnosticMatches([]);
@@ -749,8 +750,7 @@ function App() {
                         {matchedAttemptRows.length > 0 ? ` across ${matchedEventCount} organization-scoped events` : ' for API requests'}.
                         {' '}Attempt rows are not unique events or completed deliveries.
                       </p>
-                      <form className="evidence-association-form" onSubmit={submitEvidence}>
-                        <ul className="diagnostic-results">
+                      <ul className="diagnostic-results">
                           {diagnosticMatches.map((diagnostic, index) => {
                             const linked = activeCase.evidence.some((item) => item.id === diagnostic.id);
                             const history = diagnosticHistories.find((item) => item.organizationId === diagnostic.organizationId && item.eventId === diagnostic.eventId);
@@ -787,21 +787,23 @@ function App() {
                               </li>
                             );
                           })}
-                        </ul>
-                        <div className="selected-diagnostics">
-                          <strong>Rows selected for {activeCase.id}: {selectedDiagnosticIds.length}</strong>
-                          {selectedDiagnosticIds.length > 0 && (
-                            <ul>{selectedDiagnosticIds.map((id) => <li key={id}>{id}
-                              <button type="button" aria-label={'Remove ' + id + ' from selection'} onClick={() => updateDiagnosticSelection(activeCase.id, [id], false)}>Remove</button>
-                            </li>)}</ul>
-                          )}
-                        </div>
-                        <button type="submit" disabled={!selectedDiagnosticIds.length || Boolean(busySlot) || Boolean(pendingEvidence)}>
-                          Link selected evidence to {activeCase.id}
-                        </button>
-                      </form>
+                      </ul>
                     </>
                   )}
+
+                  <form className="evidence-association-form" onSubmit={submitEvidence}>
+                    <div className="selected-diagnostics">
+                      <strong>Rows selected for {activeCase.id}: {selectedDiagnosticIds.length}</strong>
+                      {selectedDiagnosticIds.length > 0 && (
+                        <ul>{selectedDiagnosticIds.map((id) => <li key={id}>{id}
+                          <button type="button" aria-label={'Remove ' + id + ' from selection'} onClick={() => updateDiagnosticSelection(activeCase.id, [id], false)}>Remove</button>
+                        </li>)}</ul>
+                      )}
+                    </div>
+                    <button type="submit" disabled={!selectedDiagnosticIds.length || Boolean(busySlot) || Boolean(pendingEvidence)}>
+                      Link selected evidence to {activeCase.id}
+                    </button>
+                  </form>
 
                   {diagnosticDetail && (
                     <section className="diagnostic-inspection" aria-label="Selected diagnostic details">

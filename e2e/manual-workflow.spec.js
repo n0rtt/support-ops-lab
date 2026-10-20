@@ -26,6 +26,27 @@ async function holdCommittedResponse(page, matcher) {
   return { requestCommitted, responseFulfilled, release };
 }
 
+async function withFreshApp(browser, run) {
+  const directory = mkdtempSync(join(tmpdir(), 'supportops-diagnostic-ui-'));
+  const db = openDatabase(join(directory, 'supportops.sqlite'));
+  initializeDatabase(db);
+  const server = createApp({ db }).listen(0, '127.0.0.1');
+  let context;
+  try {
+    await new Promise((resolve, reject) => {
+      server.once('listening', resolve);
+      server.once('error', reject);
+    });
+    context = await browser.newContext();
+    await run(await context.newPage(), 'http://127.0.0.1:' + server.address().port);
+  } finally {
+    await context?.close();
+    if (server.listening) await new Promise((resolve) => server.close(resolve));
+    db.close();
+    rmSync(directory, { recursive: true, force: true });
+  }
+}
+
 test('A shows its three linked 401 records and KB inspection without losing the case draft', async ({ page }, testInfo) => {
   await page.goto('/#SEW-1001');
   await expect(page.getByRole('heading', { name: 'Nightly API sync returns 401 responses' })).toBeVisible();
@@ -42,6 +63,112 @@ test('A shows its three linked 401 records and KB inspection without losing the 
   await expect(page.getByText(/Repeated 401 responses alone do not establish a provider outage/)).toBeVisible();
   await expect(note).toHaveValue('Keep this A draft while inspecting diagnostic and KB context.');
   await page.screenshot({ path: testInfo.outputPath('m3-a-investigation.png'), fullPage: true });
+});
+
+test('evidence selection stays actionable after reload and search states', async ({ browser }) => {
+  await withFreshApp(browser, async (page, baseUrl) => {
+    await page.goto(baseUrl + '/#SEW-1002');
+    await page.locator('#diagnostic-query').fill('evt_invoice_731');
+    await page.getByRole('button', { name: 'Search diagnostics' }).click();
+    const firstAttempt = page.locator('.diagnostic-result').filter({ hasText: 'DIAG-WH-INV-001' });
+    await firstAttempt.getByRole('checkbox', { name: 'Select for association' }).check();
+    await page.getByRole('button', { name: 'Link selected evidence to SEW-1002' }).click();
+    await expect(page.getByText('Saved.', { exact: true })).toBeVisible();
+
+    await page.reload();
+    const linkedAttempt = page.locator('.linked-evidence-list .diagnostic-card').filter({ hasText: 'DIAG-WH-INV-001' });
+    await linkedAttempt.getByRole('button', { name: 'Inspect record and attempts' }).click();
+    const remainingAttempt = page.locator('.attempt-history .diagnostic-card').filter({ hasText: 'DIAG-WH-INV-002' });
+    await remainingAttempt.getByRole('checkbox', { name: 'Select this attempt for association' }).check();
+    await expect(page.getByText('Rows selected for SEW-1002: 1')).toBeVisible();
+    await page.getByRole('button', { name: 'Link selected evidence to SEW-1002' }).click();
+    await expect(page.getByText('Saved.', { exact: true })).toBeVisible();
+    const linked = await page.evaluate(async () => (await (await fetch('/api/cases/SEW-1002')).json()).case.evidence.map((item) => item.id));
+    expect(linked).toEqual(['DIAG-WH-INV-001', 'DIAG-WH-INV-002']);
+
+    await page.locator('#diagnostic-query').fill('evt_subscription_480');
+    await page.getByRole('button', { name: 'Search diagnostics' }).click();
+    const subscriptionAttempt = page.locator('.diagnostic-result').filter({ hasText: 'DIAG-WH-SUB-001' });
+    await subscriptionAttempt.getByRole('checkbox', { name: 'Select for association' }).check();
+
+    await page.locator('#diagnostic-query').fill('no-such-diagnostic');
+    await page.getByRole('button', { name: 'Search diagnostics' }).click();
+    await expect(page.getByRole('status').filter({ hasText: 'No diagnostic records matched this exact ID' })).toBeVisible();
+    await expect(page.getByText('Rows selected for SEW-1002: 1')).toBeVisible();
+    await page.getByRole('button', { name: 'Remove DIAG-WH-SUB-001 from selection' }).click();
+    await expect(page.getByText('Rows selected for SEW-1002: 0')).toBeVisible();
+
+    await page.locator('#diagnostic-query').fill('evt_subscription_480');
+    await page.getByRole('button', { name: 'Search diagnostics' }).click();
+    await page.locator('.diagnostic-result').filter({ hasText: 'DIAG-WH-SUB-001' }).getByRole('checkbox', { name: 'Select for association' }).check();
+    const failedSearch = (url) => url.pathname === '/api/diagnostics' && url.searchParams.get('q') === 'search-unavailable';
+    await page.route(failedSearch, (route) => route.fulfill({ status: 503, contentType: 'application/json', body: '{"error":"unavailable"}' }));
+    await page.locator('#diagnostic-query').fill('search-unavailable');
+    await page.getByRole('button', { name: 'Search diagnostics' }).click();
+    await expect(page.getByRole('alert').filter({ hasText: 'Diagnostic search is unavailable' })).toBeVisible();
+    await expect(page.getByText('Rows selected for SEW-1002: 1')).toBeVisible();
+    await page.getByRole('button', { name: 'Remove DIAG-WH-SUB-001 from selection' }).click();
+    await expect(page.getByText('Rows selected for SEW-1002: 0')).toBeVisible();
+    await page.unroute(failedSearch);
+
+    await page.locator('#diagnostic-query').fill('evt_subscription_480');
+    await page.getByRole('button', { name: 'Search diagnostics' }).click();
+    await page.locator('.diagnostic-result').filter({ hasText: 'DIAG-WH-SUB-001' }).getByRole('checkbox', { name: 'Select for association' }).check();
+    await page.getByRole('button', { name: /SEW-1001/ }).click();
+    await expect(page.getByText('Rows selected for SEW-1001: 0')).toBeVisible();
+    await page.getByRole('button', { name: /SEW-1002/ }).click();
+    await expect(page.getByText('Rows selected for SEW-1002: 1')).toBeVisible();
+  });
+});
+
+test('a new search invalidates pending diagnostic detail success and failure responses', async ({ browser }) => {
+  await withFreshApp(browser, async (page, baseUrl) => {
+    async function search(query) {
+      await page.locator('#diagnostic-query').fill(query);
+      await page.getByRole('button', { name: 'Search diagnostics' }).click();
+    }
+
+    await page.goto(baseUrl + '/#SEW-1002');
+    await search('evt_subscription_480');
+    const heldSuccess = await holdCommittedResponse(page, '**/api/diagnostics/DIAG-WH-SUB-001');
+    await page.locator('.diagnostic-result').filter({ hasText: 'DIAG-WH-SUB-001' }).getByRole('button', { name: 'Inspect record and attempts' }).click();
+    await heldSuccess.requestCommitted;
+    await search('no-such-diagnostic');
+    await expect(page.getByRole('status').filter({ hasText: 'No diagnostic records matched this exact ID' })).toBeVisible();
+    heldSuccess.release();
+    await heldSuccess.responseFulfilled;
+    await page.waitForTimeout(100);
+    await expect(page.getByLabel('Selected diagnostic details')).toHaveCount(0);
+    await page.unroute('**/api/diagnostics/DIAG-WH-SUB-001');
+
+    await search('evt_subscription_480');
+    let release;
+    let detailStarted;
+    let detailFailed;
+    let held = false;
+    const responseHeld = new Promise((resolve) => { release = resolve; });
+    const requestStarted = new Promise((resolve) => { detailStarted = resolve; });
+    const requestFailed = new Promise((resolve) => { detailFailed = resolve; });
+    await page.route('**/api/diagnostics/DIAG-WH-SUB-001', async (route) => {
+      if (held) return route.continue();
+      held = true;
+      const response = await route.fetch();
+      expect(response.status()).toBe(200);
+      detailStarted();
+      await responseHeld;
+      await route.abort();
+      detailFailed();
+    });
+    await page.locator('.diagnostic-result').filter({ hasText: 'DIAG-WH-SUB-001' }).getByRole('button', { name: 'Inspect record and attempts' }).click();
+    await requestStarted;
+    await search('no-such-diagnostic');
+    await expect(page.getByRole('status').filter({ hasText: 'No diagnostic records matched this exact ID' })).toBeVisible();
+    release();
+    await requestFailed;
+    await page.waitForTimeout(100);
+    await expect(page.getByLabel('Selected diagnostic details')).toHaveCount(0);
+    await expect(page.getByRole('alert').filter({ hasText: 'Diagnostic details are unavailable' })).toHaveCount(0);
+  });
 });
 
 test('manual resolution preserves history, simulated labeling, selection, and case draft', async ({ page }) => {
@@ -75,7 +202,7 @@ test('manual resolution preserves history, simulated labeling, selection, and ca
   await expect(page.locator('.activity-list').getByText('Please confirm the next scheduled sync succeeds.', { exact: true })).toBeVisible();
 
   const staleDetail = await holdCommittedResponse(page, '**/api/cases/SEW-1001');
-  await page.getByRole('button', { name: /SEW-1001/ }).click();
+  await page.locator('button.case-card').filter({ hasText: 'SEW-1001' }).click();
   await staleDetail.requestCommitted;
 
   await page.getByLabel('Visible to support operators only').fill('Draft to keep while the case leaves the Open filter.');
@@ -94,7 +221,7 @@ test('manual resolution preserves history, simulated labeling, selection, and ca
   await expect(page.getByText('Resolution outcome: The customer confirmed the integration works after rotating the key.')).toBeVisible();
   await expect(page.getByLabel('Move case to')).toHaveCount(0);
   await expect(page.getByLabel('Visible to support operators only')).toHaveValue('Draft to keep while the case leaves the Open filter.');
-  await expect(page.getByRole('button', { name: /SEW-1001/ })).toHaveCount(0);
+  await expect(page.locator('button.case-card').filter({ hasText: 'SEW-1001' })).toHaveCount(0);
 
   await page.reload();
   await expect(page.getByRole('status').filter({ hasText: 'outside the current Open filter' })).toBeVisible();
@@ -239,7 +366,7 @@ test('a late acknowledgment cannot replace the selected case or redirect its nex
   hold.release();
   await expect(page).toHaveURL(/#SEW-1002$/);
   await expect(page.getByRole('heading', { name: 'Subscription updates are not appearing' })).toBeVisible();
-  await expect(page.getByRole('button', { name: /SEW-1002/ })).toHaveAttribute('aria-pressed', 'true');
+  await expect(page.locator('button.case-card').filter({ hasText: 'SEW-1002' })).toHaveAttribute('aria-pressed', 'true');
   await page.unroute('**/api/cases/SEW-1001/activities');
 
   await page.getByLabel('Visible to support operators only').fill('This note belongs to selected SEW-1002.');

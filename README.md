@@ -1,6 +1,6 @@
 # Support Engineering Workbench
 
-**Status: M3 implementation passed independent technical review at `68c6a0c4934c2a4466a3059b862b66b1dd0bab8c`. Product Owner acceptance, merge authorization, and integrated CI are pending.**
+**Status: The two minor findings reported for `b49707ce7531b557c63fc67a5542236a84c7d72f` are fixed in this branch. Independent technical re-review, Product Owner acceptance, merge authorization, and integrated CI are pending.**
 
 This public portfolio project is a local-first workbench for fictional API integration support cases. M1 provides the working foundation and synthetic reports. M2 adds the manual support workflow. The M3 branch adds exact diagnostic lookup, explicit evidence association, event-attempt inspection, and four read-only knowledge entries. No AI credentials or external services are required.
 
