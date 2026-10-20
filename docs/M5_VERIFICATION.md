@@ -45,17 +45,22 @@ After confirming restart persistence, the persistent server was stopped. `npm ru
 
 - The Chromium E2E checks verify associated labels on visible form controls, a visible 3px keyboard focus outline, Enter activation of the fixture button, and visible `Saved.` status feedback. A rendered-page inspection found no unlabeled input, textarea, or select controls.
 - Computed Chromium text contrast for representative visible elements: case heading `14.55:1`; activity text `9.04:1`; form label `6.62:1`; primary action button `6.05:1`. These are targeted samples, not a full accessibility audit.
-- Responsive reflow had no horizontal overflow at 1440, 720, 360, or 320 CSS-pixel viewport widths. The 720px case is a 200%-zoom-equivalent viewport starting from 1440 CSS pixels; native browser zoom controls were not changed.
+- Responsive reflow had no document overflow at 1440, 720, 360, or 320 CSS-pixel viewport widths. The layout E2E opens the structured editor at 360px, verifies each supplied-reference label stays within its fieldset, repeats the containment and document-overflow checks at 320px, then saves an edited recommendation with Enter and verifies its `Edited` status. The 720px case is a 200%-zoom-equivalent viewport starting from 1440 CSS pixels; native browser zoom controls were not changed.
 - A practical Firefox `155.0` smoke loaded `SEW-1001`, confirmed its three diagnostic rows and no-key fixture flow, and found no horizontal overflow at 720px. The full browser suite ran in Chromium `153.0.8010.12`; Firefox did not run the full suite.
 
 ## Screenshot provenance
 
-[`docs/images/m5-scenario-a-human-correction.png`](images/m5-scenario-a-human-correction.png) is a direct, uncropped 1600×1200 CSS-pixel Chromium viewport capture of the built app, at browser version `153.0.8010.12`. It shows the persisted Scenario A evidence, original incorrect outage hypothesis, and separately edited, reviewed authentication recommendation. The source revision at capture was `eff9565` (the M5 UI source was unchanged in later M5 verification edits). The capture was taken after completing and restarting the persistent A case.
+Both images are direct, uncropped Chromium viewport captures of the built app, browser version `153.0.8010.12`, using separate fresh browser contexts against the disposable no-key demo database. Their source revision is `be76cf733cd5507c246596136561144130222fc0`; no DOM or image edits were applied.
 
-To reproduce it, use the no-key setup in [SETUP](SETUP.md), complete [Scenario A](ACCEPTANCE.md), open the reviewed recommendation, set a 1600×1200 CSS-pixel viewport, and capture the viewport without cropping. The committed screenshot itself was captured from the real application; it is not a mockup.
+- [`docs/images/m5-scenario-a-evidence.png`](images/m5-scenario-a-evidence.png) is a 1000×1400 CSS-pixel viewport centered on the case's diagnostic-evidence section, with all three HTTP 401 records visible. It was captured from the resolved A case after the persistence path completed.
+- [`docs/images/m5-scenario-a-human-correction.png`](images/m5-scenario-a-human-correction.png) is a 1000×1800 CSS-pixel viewport with the second fixture's review expanded. It shows the explicit intentionally-incorrect fixture label and original outage hypothesis above the saved human-edited authentication response.
+
+To reproduce them, use the no-key setup in [SETUP](SETUP.md), complete [Scenario A](ACCEPTANCE.md), open `SEW-1001` in fresh Chromium contexts, and capture the two viewport states and dimensions described above without cropping. The committed screenshots are from the real application, not mockups.
 
 ## Historical evidence and acceptance boundary
 
 PRs #1–#4, actual heads and integration SHAs, published review reports, Product Owner decisions, and PR/integrated-main CI runs are linked in [engineering history](ENGINEERING_HISTORY.md). The M4 accepted live-inference record remains separate from M5 local restart evidence.
+
+The independent PR #5 review requested changes at `1beddc5275f58a7d436135fd1ccb9fb77beb02c3` for screenshot readability and framing, the structured editor at 320px, and README first-screen disclosure. The follow-up adds two larger unaltered app captures, documents their visible case context, tests the open editor at 320px, and moves the no-key/simulated boundary above the screenshots. Independent exact-head re-review remains pending.
 
 M5 remains open for a different independent technical review. This record does not claim M5 Product Owner acceptance, merge, deployment, or MVP completion. The final M5 head and its PR CI run are reported on the open pull request.

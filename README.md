@@ -8,7 +8,11 @@ The principal demonstration starts with three `401 Unauthorized` observations an
 
 ### Scenario A: supplied evidence and human review
 
+**SEW-1001 · Alder Ridge Analytics.** Three associated synthetic request records each show HTTP 401.
+
 ![SEW-1001: three supplied HTTP 401 observations for the fictional Alder organization.](docs/images/m5-scenario-a-evidence.png)
+
+**Same case, after human review.** The intentionally incorrect fixture remains visible above the saved authentication recommendation and full edited response.
 
 ![SEW-1001: explicitly labeled incorrect fixture and edited authentication recommendation.](docs/images/m5-scenario-a-human-correction.png)
 
