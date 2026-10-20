@@ -262,7 +262,7 @@ test('M5 C preserves uncertainty, records a specific information request, and es
   });
 });
 
-test('M5 zoom-equivalent narrow layouts keep keyboard focus, labels, and save feedback usable', async ({ browser }) => {
+test('M5 zoom-equivalent layouts keep the structured editor inside narrow viewports and keyboard-save it', async ({ browser }) => {
   await withFreshApp(browser, async (page, baseUrl) => {
     await page.setViewportSize({ width: 1440, height: 900 });
     await page.goto(baseUrl + '/#SEW-1001');
@@ -285,7 +285,24 @@ test('M5 zoom-equivalent narrow layouts keep keyboard focus, labels, and save fe
     await page.keyboard.press('Enter');
     await expect(page.locator('.analysis-card')).toHaveCount(1);
     await expect(page.getByRole('status').filter({ hasText: 'Saved.' })).toBeVisible();
+    const analysis = page.locator('.analysis-card').first();
+    await analysis.getByRole('button', { name: 'Edit draft and approve' }).click();
+    const editor = analysis.locator('.review-structured-editor');
+    await expect(editor).toBeVisible();
+    const referenceLabelsFit = async () => editor.locator('.review-reference-picker').evaluateAll((fieldsets) =>
+      fieldsets.every((fieldset) => {
+        const right = fieldset.getBoundingClientRect().right;
+        return [...fieldset.querySelectorAll('label')].every((label) => label.getBoundingClientRect().right <= right + 0.5);
+      }));
+    expect(await referenceLabelsFit()).toBe(true);
     await page.setViewportSize({ width: 320, height: 800 });
     expect(await page.evaluate(() => document.documentElement.scrollWidth <= window.innerWidth)).toBe(true);
+    expect(await referenceLabelsFit()).toBe(true);
+    await editor.getByLabel('Customer-response draft').fill('We can review the supplied evidence, but cannot confirm a provider outage.');
+    const saveReview = analysis.getByRole('button', { name: 'Save edited recommendation as approved' });
+    await saveReview.focus();
+    await expect(saveReview).toBeFocused();
+    await page.keyboard.press('Enter');
+    await expect(analysis).toContainText('Edited');
   });
 });

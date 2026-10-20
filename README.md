@@ -4,7 +4,13 @@ Support Engineering Workbench is a local-first investigation workspace for **Tec
 
 The principal demonstration starts with three `401 Unauthorized` observations and an explicitly labeled synthetic AI fixture that incorrectly calls them a provider outage. The operator compares the fixture with the supplied authentication guidance, rejects it with a correction, inspects that feedback in a later saved context, and edits a grounded authentication response. The original fixture stays unchanged. Repeating it does not teach the fixture or produce a corrected model answer.
 
-![Scenario A: the fictional API case, supplied authentication evidence, and preserved human correction.](docs/images/m5-scenario-a-human-correction.png)
+**The complete demo runs without an API key. All records are fictional and every customer reply is simulated; nothing is sent externally.**
+
+### Scenario A: supplied evidence and human review
+
+![SEW-1001: three supplied HTTP 401 observations for the fictional Alder organization.](docs/images/m5-scenario-a-evidence.png)
+
+![SEW-1001: explicitly labeled incorrect fixture and edited authentication recommendation.](docs/images/m5-scenario-a-human-correction.png)
 
 ## Run locally without an API key
 
