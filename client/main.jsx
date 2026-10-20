@@ -76,6 +76,9 @@ function App() {
   const [selectedId, setSelectedId] = useState(selectedIdRef.current);
   const [selectedCase, setSelectedCase] = useState(null);
   const [statusFilter, setStatusFilter] = useState(() => readStorage(sessionStorage, filterStorageKey, 'all'));
+  const statusFilterRef = useRef(statusFilter);
+  const queueRequestRef = useRef(0);
+  const selectionGenerationRef = useRef(0);
   const [drafts, setDrafts] = useState(() => readStorage(sessionStorage, draftStorageKey, {}));
   const [pendingRequests, setPendingRequests] = useState(() => {
     const saved = readStorage(sessionStorage, pendingStorageKey, {});
@@ -90,6 +93,12 @@ function App() {
   const [busySlot, setBusySlot] = useState('');
   const [feedback, setFeedback] = useState({});
 
+  function applyCaseDetail(item, generation) {
+    if (selectedIdRef.current !== item.id || selectionGenerationRef.current !== generation) return;
+    setSelectedCase((current) => current?.id === item.id && current.version > item.version ? current : item);
+    setDetailError('');
+  }
+
   useEffect(() => {
     saveStorage(sessionStorage, draftStorageKey, drafts);
   }, [drafts]);
@@ -97,6 +106,7 @@ function App() {
   useEffect(() => {
     const controller = new AbortController();
     const query = statusFilter === 'all' ? '' : '?status=' + encodeURIComponent(statusFilter);
+    const request = ++queueRequestRef.current;
     setLoadState('loading');
     fetch('/api/cases' + query, { signal: controller.signal })
       .then(async (response) => {
@@ -104,12 +114,13 @@ function App() {
         return response.json();
       })
       .then(({ cases: loadedCases }) => {
+        if (request !== queueRequestRef.current || statusFilterRef.current !== statusFilter) return;
         setCases(loadedCases);
         setQueueError('');
         setLoadState('ready');
       })
       .catch((error) => {
-        if (error.name === 'AbortError') return;
+        if (error.name === 'AbortError' || request !== queueRequestRef.current || statusFilterRef.current !== statusFilter) return;
         setQueueError('The case queue could not be loaded. Your drafts remain saved in this browser.');
         setLoadState('error');
       });
@@ -120,6 +131,7 @@ function App() {
     const syncSelection = () => {
       const nextId = selectedCaseFromHash();
       if (selectedIdRef.current === nextId) return;
+      selectionGenerationRef.current += 1;
       selectedIdRef.current = nextId;
       setSelectedId(nextId);
       setSelectedCase(null);
@@ -136,6 +148,7 @@ function App() {
   useEffect(() => {
     if (loadState !== 'ready' || selectedId || cases.length === 0) return;
     const firstCaseId = cases[0].id;
+    selectionGenerationRef.current += 1;
     selectedIdRef.current = firstCaseId;
     window.history.replaceState(null, '', '#' + encodeURIComponent(firstCaseId));
     setSelectedId(firstCaseId);
@@ -146,6 +159,7 @@ function App() {
       setSelectedCase(null);
       return undefined;
     }
+    const generation = selectionGenerationRef.current;
     const controller = new AbortController();
     fetch('/api/cases/' + encodeURIComponent(selectedId), { signal: controller.signal })
       .then(async (response) => {
@@ -154,12 +168,14 @@ function App() {
         return body.case;
       })
       .then((item) => {
-        if (selectedIdRef.current !== selectedId) return;
-        setSelectedCase(item);
-        setDetailError('');
+        applyCaseDetail(item, generation);
       })
       .catch((error) => {
-        if (error.name === 'AbortError' || selectedIdRef.current !== selectedId) return;
+        if (
+          error.name === 'AbortError' ||
+          selectedIdRef.current !== selectedId ||
+          selectionGenerationRef.current !== generation
+        ) return;
         setSelectedCase(null);
         setDetailError('This case could not be loaded. The selection was kept; choose another case only if you intend to.');
       });
@@ -176,6 +192,7 @@ function App() {
       return;
     }
     window.history.pushState(null, '', '#' + encodeURIComponent(caseId));
+    selectionGenerationRef.current += 1;
     selectedIdRef.current = caseId;
     setSelectedId(caseId);
     setSelectedCase(null);
@@ -203,21 +220,27 @@ function App() {
   }
 
   async function refreshQueue() {
-    const query = statusFilter === 'all' ? '' : '?status=' + encodeURIComponent(statusFilter);
-    const response = await fetch('/api/cases' + query);
-    if (!response.ok) throw new Error('case_list_unavailable');
-    setCases((await response.json()).cases);
-    setQueueError('');
+    const filter = statusFilterRef.current;
+    const request = ++queueRequestRef.current;
+    try {
+      const query = filter === 'all' ? '' : '?status=' + encodeURIComponent(filter);
+      const response = await fetch('/api/cases' + query);
+      if (!response.ok) throw new Error('case_list_unavailable');
+      const { cases: loadedCases } = await response.json();
+      if (request !== queueRequestRef.current || statusFilterRef.current !== filter) return;
+      setCases(loadedCases);
+      setQueueError('');
+    } catch (error) {
+      if (request === queueRequestRef.current && statusFilterRef.current === filter) throw error;
+    }
   }
 
   async function refreshCase(caseId) {
+    const generation = selectionGenerationRef.current;
     const response = await fetch('/api/cases/' + encodeURIComponent(caseId));
     const body = await response.json().catch(() => ({}));
     if (!response.ok) throw new Error(body.error || 'case_detail_unavailable');
-    if (selectedIdRef.current === caseId) {
-      setSelectedCase(body.case);
-      setDetailError('');
-    }
+    applyCaseDetail(body.case, generation);
   }
 
   function describeFailure(status, code) {
@@ -389,6 +412,15 @@ function App() {
 
   const activeCase = selectedCase?.id === selectedId ? selectedCase : null;
   const selectedDraft = activeCase ? drafts[activeCase.id] || {} : {};
+  const statusSlot = activeCase ? activeCase.id + ':status' : '';
+  const pendingStatus = statusSlot ? pendingRequests[statusSlot] : null;
+  const requestedOutcome = pendingStatus?.payload?.status === 'resolved' ? pendingStatus.payload.outcome : undefined;
+  const savedOutcome = activeCase?.activities
+    .filter((activity) => activity.type === 'status_changed' && activity.payload.to === 'resolved')
+    .at(-1)?.payload.outcome;
+  const retainedOutcomeDraft = selectedDraft.resolutionOutcome &&
+    selectedDraft.resolutionOutcome !== requestedOutcome &&
+    selectedDraft.resolutionOutcome !== savedOutcome;
   const selectedIsOutsideFilter = Boolean(
     activeCase && statusFilter !== 'all' && activeCase.status !== statusFilter,
   );
@@ -416,6 +448,8 @@ function App() {
               value={statusFilter}
               onChange={(event) => {
                 const value = event.target.value;
+                statusFilterRef.current = value;
+                queueRequestRef.current += 1;
                 saveStorage(sessionStorage, filterStorageKey, value);
                 setStatusFilter(value);
               }}
@@ -545,7 +579,7 @@ function App() {
                   {activeCase.status === 'resolved' ? (
                     <>
                       <p className="terminal-note">Resolved is terminal. Internal notes and simulated replies can still be recorded without changing the resolution.</p>
-                      {selectedDraft.resolutionOutcome && (
+                      {retainedOutcomeDraft && (
                         <div className="status-form">
                           <div className="status-fields">
                             <label htmlFor="retained-resolution-outcome">Unsaved resolution outcome draft</label>
@@ -593,12 +627,12 @@ function App() {
                       <button type="submit" disabled={!selectedDraft.transitionTarget || Boolean(busySlot) || Boolean(pendingRequests[activeCase.id + ':status'])}>
                         Save status and history
                       </button>
-                      {pendingRequests[activeCase.id + ':status'] && (
-                        <PendingAction slot={activeCase.id + ':status'} action={pendingRequests[activeCase.id + ':status']} busySlot={busySlot} feedback={feedback} retry={sendPending} reconcile={reconcileConflict} />
-                      )}
-                      {feedback[activeCase.id + ':status'] && <p className="save-feedback" role="status">{feedback[activeCase.id + ':status']}</p>}
                     </form>
                   )}
+                  {pendingStatus && (
+                    <PendingAction slot={statusSlot} action={pendingStatus} busySlot={busySlot} feedback={feedback} retry={sendPending} reconcile={reconcileConflict} />
+                  )}
+                  {!pendingStatus && feedback[statusSlot] && <p className="save-feedback" role="status">{feedback[statusSlot]}</p>}
                 </section>
               </article>
             )}
@@ -619,6 +653,9 @@ function PendingAction({ slot, action, busySlot, feedback, retry, reconcile }) {
     <div className="pending-action">
       <p>{action.state === 'conflict' ? 'This request was rejected and will not be retried automatically.' : 'A previous save is awaiting confirmation. The exact request is retained.'}</p>
       {action.type !== 'status' && <blockquote>{action.payload.text}</blockquote>}
+      {action.type === 'status' && action.payload.status === 'resolved' && (
+        <blockquote>Submitted resolution outcome: {action.payload.outcome}</blockquote>
+      )}
       {feedback[slot] && <p role="alert">{feedback[slot]}</p>}
       {action.state === 'conflict' ? (
         <button type="button" onClick={() => reconcile(slot, action)} disabled={Boolean(busySlot)}>Reload case and review draft</button>

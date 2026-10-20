@@ -3,16 +3,22 @@ import { expect, test } from '@playwright/test';
 async function holdCommittedResponse(page, matcher) {
   let release;
   let committed;
+  let fulfilled;
+  let held = false;
   const responseHeld = new Promise((resolve) => { release = resolve; });
   const requestCommitted = new Promise((resolve) => { committed = resolve; });
+  const responseFulfilled = new Promise((resolve) => { fulfilled = resolve; });
   await page.route(matcher, async (route) => {
+    if (held) return route.continue();
+    held = true;
     const response = await route.fetch();
     expect(response.status()).toBe(200);
     committed();
     await responseHeld;
     await route.fulfill({ response });
+    fulfilled();
   });
-  return { requestCommitted, release };
+  return { requestCommitted, responseFulfilled, release };
 }
 
 test('manual resolution preserves history, simulated labeling, selection, and case draft', async ({ page }) => {
@@ -44,6 +50,10 @@ test('manual resolution preserves history, simulated labeling, selection, and ca
   await expect(page.locator('.activity-list').getByText('Simulated reply to customer — not sent', { exact: true })).toBeVisible();
   await expect(page.locator('.activity-list').getByText('Please confirm the next scheduled sync succeeds.', { exact: true })).toBeVisible();
 
+  const staleDetail = await holdCommittedResponse(page, '**/api/cases/SEW-1001');
+  await page.getByRole('button', { name: /SEW-1001/ }).click();
+  await staleDetail.requestCommitted;
+
   await page.getByLabel('Visible to support operators only').fill('Draft to keep while the case leaves the Open filter.');
   await page.getByLabel('Move case to').selectOption('resolved');
   await page.getByLabel('Resolution outcome').fill('The customer confirmed the integration works after rotating the key.');
@@ -51,6 +61,14 @@ test('manual resolution preserves history, simulated labeling, selection, and ca
 
   await expect(page.getByRole('status').filter({ hasText: 'outside the current Open filter' })).toBeVisible();
   await expect(page.getByRole('heading', { name: 'Nightly API sync returns 401 responses' })).toBeVisible();
+  await expect(page.locator('.case-detail .status-resolved')).toBeVisible();
+  await expect(page.getByText('Resolution outcome: The customer confirmed the integration works after rotating the key.')).toBeVisible();
+  staleDetail.release();
+  await staleDetail.responseFulfilled;
+  await page.unroute('**/api/cases/SEW-1001');
+  await expect(page.locator('.case-detail .status-resolved')).toBeVisible();
+  await expect(page.getByText('Resolution outcome: The customer confirmed the integration works after rotating the key.')).toBeVisible();
+  await expect(page.getByLabel('Move case to')).toHaveCount(0);
   await expect(page.getByLabel('Visible to support operators only')).toHaveValue('Draft to keep while the case leaves the Open filter.');
   await expect(page.getByRole('button', { name: /SEW-1001/ })).toHaveCount(0);
 
@@ -62,6 +80,24 @@ test('manual resolution preserves history, simulated labeling, selection, and ca
   await expect(page.locator('.activity-list').getByText('Simulated reply to customer — not sent', { exact: true })).toBeVisible();
   await expect(page.getByText('Resolution outcome: The customer confirmed the integration works after rotating the key.')).toBeVisible();
   await expect(page.getByText('Resolved is terminal. Internal notes and simulated replies can still be recorded without changing the resolution.')).toBeVisible();
+});
+
+test('a late save refresh respects the current status filter', async ({ page }) => {
+  await page.goto('/#SEW-1001');
+  const hold = await holdCommittedResponse(page, '**/api/cases/SEW-1001/activities');
+  await page.getByLabel('Visible to support operators only').fill('This note must not replace the active queue filter.');
+  await page.getByRole('button', { name: 'Add internal note' }).click();
+  await hold.requestCommitted;
+
+  await page.getByLabel('Filter cases by status').selectOption('resolved');
+  const cards = page.locator('.case-card .status');
+  await expect(cards).toHaveText(['Resolved']);
+  hold.release();
+  await hold.responseFulfilled;
+
+  await expect(page.getByText('Saved.', { exact: true })).toBeVisible();
+  await expect(page.getByLabel('Filter cases by status')).toHaveValue('resolved');
+  await expect(cards).toHaveText(['Resolved']);
 });
 
 test('a late acknowledgment cannot replace the selected case or redirect its next action', async ({ page }) => {
@@ -122,7 +158,8 @@ test('newer note, reply, and outcome drafts survive earlier acknowledgments and 
   await hold.requestCommitted;
   await page.getByLabel('Resolution outcome').fill('Newer outcome draft must remain.');
   hold.release();
-  await expect(page.getByText('Resolution outcome: Submitted resolution outcome.')).toBeVisible();
+  await expect(page.locator('.activity-list').getByText('Resolution outcome: Submitted resolution outcome.')).toBeVisible();
+  await expect(page.locator('.status-section .save-feedback')).toHaveText('Saved.');
   await page.unroute(statusMatcher);
   await expect.poll(() => page.evaluate(() => JSON.parse(sessionStorage.getItem('supportops.case-drafts.v1'))['SEW-1002'])).toMatchObject({
     noteText: 'Newer note draft must remain.',
@@ -131,7 +168,7 @@ test('newer note, reply, and outcome drafts survive earlier acknowledgments and 
   });
 
   await page.reload();
-  await expect(page.getByText('Resolution outcome: Submitted resolution outcome.')).toBeVisible();
+  await expect(page.locator('.activity-list').getByText('Resolution outcome: Submitted resolution outcome.')).toBeVisible();
   await expect(note).toHaveValue('Newer note draft must remain.');
   await expect(reply).toHaveValue('Newer reply draft must remain.');
   const retainedOutcome = page.getByLabel('Unsaved resolution outcome draft');
@@ -186,6 +223,42 @@ test('insufficient-information case can be escalated with an empty evidence list
   await expect(page.getByText('Findings: No request ID, exact time, or matching technical evidence is available.')).toBeVisible();
   await expect(page.getByText('Outstanding questions: Which request IDs and UTC time window are affected?')).toBeVisible();
   await expect(page.getByText('Diagnostic evidence: None linked.')).toBeVisible();
+});
+
+test('an uncertain resolution remains confirmable after reload on a resolved case', async ({ page }) => {
+  await page.goto('/#SEW-1003');
+  await expect(page.locator('.case-detail .status-escalated')).toBeVisible();
+  await page.route('**/api/cases/SEW-1003/status', async (route) => {
+    const response = await route.fetch();
+    expect(response.status()).toBe(200);
+    await route.abort();
+  });
+  await page.getByLabel('Move case to').selectOption('resolved');
+  await page.getByLabel('Resolution outcome').fill('Engineering confirmed the reported issue is resolved.');
+  await page.getByRole('button', { name: 'Save status and history' }).click();
+  await expect(page.getByRole('alert').getByText(/connection ended before the save was confirmed/)).toBeVisible();
+
+  await page.unroute('**/api/cases/SEW-1003/status');
+  await page.reload();
+  await expect(page.locator('.case-detail .status-resolved')).toBeVisible();
+  const resolutionEvent = page.locator('.activity-status_changed').filter({ hasText: 'Status changed from Escalated to Resolved.' });
+  await expect(resolutionEvent.getByText('Resolution outcome: Engineering confirmed the reported issue is resolved.')).toBeVisible();
+  await expect(page.getByText('Submitted resolution outcome: Engineering confirmed the reported issue is resolved.')).toBeVisible();
+  await expect(page.getByRole('button', { name: 'Retry exact save' })).toBeVisible();
+  await expect(page.getByLabel('Unsaved resolution outcome draft')).toHaveCount(0);
+
+  await page.getByRole('button', { name: 'Retry exact save' }).click();
+  await expect(page.getByText('Save confirmed from the existing receipt.', { exact: true })).toBeVisible();
+  await expect(page.getByRole('button', { name: 'Retry exact save' })).toHaveCount(0);
+  await expect(page.getByLabel('Unsaved resolution outcome draft')).toHaveCount(0);
+  const { case: saved } = await (await page.request.get('/api/cases/SEW-1003')).json();
+  expect(saved.status).toBe('resolved');
+  expect(saved.version).toBe(3);
+  expect(saved.activities.filter((activity) => activity.type === 'status_changed' && activity.payload.to === 'resolved')).toHaveLength(1);
+  expect(saved.activities.find((activity) => activity.type === 'status_changed' && activity.payload.to === 'resolved').payload.outcome)
+    .toBe('Engineering confirmed the reported issue is resolved.');
+  expect(await page.evaluate(() => JSON.parse(sessionStorage.getItem('supportops.pending-actions.v1') || '{}')['SEW-1003:status']))
+    .toBeUndefined();
 });
 
 test('interrupted saves retry with the same key and stale conflicts require explicit reconciliation', async ({ page }) => {
