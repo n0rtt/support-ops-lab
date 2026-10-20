@@ -4,6 +4,7 @@ import { join } from 'node:path';
 import { expect, test } from '@playwright/test';
 import { createApp } from '../server/app.js';
 import { initializeDatabase, openDatabase } from '../server/database.js';
+import { withFreshApp } from './support.js';
 
 async function holdCommittedResponse(page, matcher) {
   let release;
@@ -26,27 +27,6 @@ async function holdCommittedResponse(page, matcher) {
   return { requestCommitted, responseFulfilled, release };
 }
 
-async function withFreshApp(browser, run) {
-  const directory = mkdtempSync(join(tmpdir(), 'supportops-diagnostic-ui-'));
-  const db = openDatabase(join(directory, 'supportops.sqlite'));
-  initializeDatabase(db);
-  const server = createApp({ db }).listen(0, '127.0.0.1');
-  let context;
-  try {
-    await new Promise((resolve, reject) => {
-      server.once('listening', resolve);
-      server.once('error', reject);
-    });
-    context = await browser.newContext();
-    await run(await context.newPage(), 'http://127.0.0.1:' + server.address().port);
-  } finally {
-    await context?.close();
-    if (server.listening) await new Promise((resolve) => server.close(resolve));
-    db.close();
-    rmSync(directory, { recursive: true, force: true });
-  }
-}
-
 test('A shows its three linked 401 records and KB inspection without losing the case draft', async ({ page }, testInfo) => {
   await page.goto('/#SEW-1001');
   await expect(page.getByRole('heading', { name: 'Nightly API sync returns 401 responses' })).toBeVisible();
@@ -58,7 +38,7 @@ test('A shows its three linked 401 records and KB inspection without losing the 
   await page.getByRole('button', { name: 'Search diagnostics' }).click();
   await expect(page.locator('.diagnostic-result')).toHaveCount(1);
   await expect(page.locator('.diagnostic-result')).toContainText('DIAG-AUTH-401-001');
-  await page.getByRole('button', { name: /KB-AUTH-01/ }).click();
+  await page.getByRole('button', { name: 'KB-AUTH-01 · Interpreting API authentication failures · v1' }).click();
   await expect(page.getByRole('heading', { name: /Interpreting API authentication failures/ })).toBeVisible();
   await expect(page.getByText(/Repeated 401 responses alone do not establish a provider outage/)).toBeVisible();
   await expect(note).toHaveValue('Keep this A draft while inspecting diagnostic and KB context.');
@@ -173,7 +153,7 @@ test('a new search invalidates pending diagnostic detail success and failure res
 
 test('manual resolution preserves history, simulated labeling, selection, and case draft', async ({ page }) => {
   await page.goto('/');
-  await expect(page.getByText('M3 diagnostic investigation · no AI credentials needed')).toBeVisible();
+  await expect(page.getByText('M4 supervised analysis · fictional cases and simulated replies')).toBeVisible();
   await expect(page.getByRole('button', { name: /SEW-1001/ }).getByText('High priority', { exact: true })).toBeVisible();
   await expect(page.getByRole('button', { name: /SEW-1002/ }).getByText('Medium priority', { exact: true })).toBeVisible();
   await expect(page.getByRole('button', { name: /SEW-1003/ }).getByText('Low priority', { exact: true })).toBeVisible();
@@ -405,7 +385,7 @@ test('newer note, reply, and outcome drafts survive earlier acknowledgments and 
   await hold.requestCommitted;
   await reply.fill('Newer reply draft must remain.');
   hold.release();
-  await expect(page.getByText('Saved.', { exact: true })).toBeVisible();
+  await expect(page.locator('.reply-card .save-feedback')).toHaveText('Saved.');
   await expect(reply).toHaveValue('Newer reply draft must remain.');
   await page.unroute('**/api/cases/SEW-1002/activities');
 
@@ -413,6 +393,7 @@ test('newer note, reply, and outcome drafts survive earlier acknowledgments and 
   hold = await holdCommittedResponse(page, statusMatcher);
   await page.getByLabel('Move case to').selectOption('resolved');
   await page.getByLabel('Resolution outcome').fill('Submitted resolution outcome.');
+  await expect(page.getByRole('button', { name: 'Save status and history' })).toBeEnabled();
   await page.getByRole('button', { name: 'Save status and history' }).click();
   await hold.requestCommitted;
   await page.getByLabel('Resolution outcome').fill('Newer outcome draft must remain.');

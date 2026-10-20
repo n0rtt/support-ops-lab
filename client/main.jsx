@@ -1,5 +1,6 @@
 import { useEffect, useRef, useState } from 'react';
 import { createRoot } from 'react-dom/client';
+import { validateRecommendation } from '../shared/recommendation.js';
 import './styles.css';
 
 const channelNames = { email: 'Email', telegram: 'Telegram', manual: 'Manual / internal' };
@@ -66,6 +67,11 @@ function activityLabel(activity) {
   if (activity.type === 'initial_report') return 'Initial customer report';
   if (activity.type === 'note' || activity.type === 'internal_note') return 'Internal note';
   if (activity.type === 'simulated_reply') return 'Simulated reply to customer — not sent';
+  if (activity.type === 'analysis_started') return 'Live analysis started';
+  if (activity.type === 'analysis_completed') return 'Live analysis completed';
+  if (activity.type === 'analysis_failed') return 'Analysis ended';
+  if (activity.type === 'analysis_fixture_loaded') return 'Evaluation fixture loaded';
+  if (activity.type === 'analysis_reviewed') return 'Recommendation reviewed';
   return 'System event';
 }
 
@@ -87,8 +93,154 @@ function activitySummary(activity) {
   if (activity.type === 'evidence_seeded' || activity.type === 'evidence_linked') {
     lines.push(`${payload.source === 'synthetic_seed' ? 'Synthetic seed linked' : 'Evidence linked'}: ${(payload.diagnosticIds || []).join(', ')}.`);
   }
+  if (activity.type === 'analysis_started') lines.push(`Analysis ${payload.analysisId} uses a saved case-context snapshot.`);
+  if (activity.type === 'analysis_completed') lines.push(`Analysis ${payload.analysisId} completed; human review is required.`);
+  if (activity.type === 'analysis_failed') lines.push(`Analysis ${payload.analysisId} ended (${payload.failureCode || payload.status}).`);
+  if (activity.type === 'analysis_fixture_loaded') lines.push(`Loaded synthetic evaluation ${payload.fixtureId}; this is not a real model response.`);
+  if (activity.type === 'analysis_reviewed') lines.push(`Analysis ${payload.analysisId} received a ${payload.decision} review.`);
   if (payload.outcome) lines.push(`Resolution outcome: ${payload.outcome}`);
   return lines.join('\n');
+}
+
+function RecommendationContent({ analysis, onInspectReference }) {
+  if (!analysis.recommendation) return <p className="analysis-failure" role="status">This analysis has no recommendation ({analysis.failureCode || analysis.status}).</p>;
+  const recommendation = analysis.recommendation;
+  const invalidReferences = analysis.referenceValidation?.unsupportedReferences || [];
+  function references(items, location) {
+    if (!items?.length) return null;
+    return <ul className="analysis-references">{items.map((reference, index) => {
+      const unsupported = invalidReferences.some((item) => item.location === location && item.kind === reference.kind && item.id === reference.id);
+      return <li key={reference.kind + ':' + reference.id + ':' + index}>
+        {unsupported
+          ? <span className="unsupported-reference">Unsupported reference: {reference.kind} · {reference.id} was not in the saved context.</span>
+          : <button type="button" className="supplied-reference" onClick={() => onInspectReference(reference)}>
+              Supplied {reference.kind}: {reference.id}
+            </button>}
+      </li>;
+    })}</ul>;
+  }
+  return (
+    <div className="recommendation-content">
+      {analysis.referenceValidation?.valid === false ? (
+        <p className="notice notice-error" role="alert">Unsupported references are visible below. Approval and reviewed-draft reuse are blocked; rejection and corrective feedback remain available.</p>
+      ) : <p className="field-hint">A supplied reference shows that the ID was in this saved context. It does not prove the AI’s interpretation is true.</p>}
+      <section>
+        <h5>AI-proposed observations — human verification required</h5>
+        {recommendation.observations.length ? <ul>{recommendation.observations.map((item, index) => <li key={index}><p>{item.text}</p>{references(item.references, `observations[${index}]`)}</li>)}</ul> : <p>No supported observations were returned.</p>}
+      </section>
+      <section>
+        <h5>Possible cause — hypothesis</h5>
+        {recommendation.possibleCause ? <><p>{recommendation.possibleCause.text}</p>{references(recommendation.possibleCause.references, 'possibleCause')}</> : <p>No cause is proposed.</p>}
+      </section>
+      <section><h5>Recommended next steps — not executed</h5><ol>{recommendation.nextSteps.map((step, index) => <li key={index}>{step}</li>)}</ol></section>
+      <section><h5>Uncertainty and missing information</h5>{recommendation.uncertainty.length ? <ul>{recommendation.uncertainty.map((item, index) => <li key={index}>{item}</li>)}</ul> : <p>None stated.</p>}</section>
+      <section><h5>Unapproved customer-response draft</h5><blockquote>{recommendation.draftResponse}</blockquote></section>
+      {references(recommendation.references, 'references')}
+    </div>
+  );
+}
+
+function ReviewedRecommendationContent({ recommendation }) {
+  return <div className="recommendation-content reviewed-recommendation">
+    <p><strong>Classification:</strong> {displayValue(recommendation.classification)}</p>
+    <section><h5>Reviewed observations</h5>{recommendation.observations.length
+      ? <ul>{recommendation.observations.map((item, index) => <li key={index}>{item.text}<p>{item.references.map((reference) => `${reference.kind} · ${reference.id}`).join(', ') || 'No supplied references'}</p></li>)}</ul>
+      : <p>No observations recorded.</p>}</section>
+    <section><h5>Reviewed hypothesis</h5><p>{recommendation.possibleCause?.text || 'No cause is proposed.'}</p>{recommendation.possibleCause?.references.length > 0 && <p>{recommendation.possibleCause.references.map((reference) => `${reference.kind} · ${reference.id}`).join(', ')}</p>}</section>
+    <section><h5>Reviewed next steps</h5><ol>{recommendation.nextSteps.map((step, index) => <li key={index}>{step}</li>)}</ol></section>
+    <section><h5>Reviewed response draft</h5><blockquote>{recommendation.draftResponse}</blockquote></section>
+    <section><h5>Reviewed uncertainty</h5>{recommendation.uncertainty.length ? <ul>{recommendation.uncertainty.map((item, index) => <li key={index}>{item}</li>)}</ul> : <p>None stated.</p>}</section>
+    <p><strong>Overall references:</strong> {recommendation.references.map((reference) => `${reference.kind} · ${reference.id}`).join(', ') || 'None'}</p>
+  </div>;
+}
+
+function RecommendationEditor({ recommendation, allowlist, onChange }) {
+  const choices = [
+    ...(allowlist?.diagnostics || []).map((id) => ({ kind: 'diagnostic', id })),
+    ...(allowlist?.knowledge || []).map((id) => ({ kind: 'knowledge', id })),
+  ];
+  function update(field, value) { onChange({ ...recommendation, [field]: value }); }
+  function updateObservation(index, changes) {
+    update('observations', recommendation.observations.map((item, itemIndex) => itemIndex === index ? { ...item, ...changes } : item));
+  }
+  function renderReferences(label, selected, change) {
+    const keys = new Set(choices.map((item) => item.kind + ':' + item.id));
+    const unsupported = selected.filter((item) => !keys.has(item.kind + ':' + item.id));
+    const items = [...choices, ...unsupported];
+    return <fieldset className="review-reference-picker">
+      <legend>{label}</legend>
+      {items.length ? items.map((item) => {
+        const key = item.kind + ':' + item.id;
+        const checked = selected.some((value) => value.kind + ':' + value.id === key);
+        return <label key={key}>
+          <input type="checkbox" checked={checked} onChange={() => change(checked
+            ? selected.filter((value) => value.kind + ':' + value.id !== key)
+            : [...selected, item])} />
+          {item.id}{keys.has(key) ? '' : ' (not in saved context; remove)'}
+        </label>;
+      }) : <p>No references were supplied for this case.</p>}
+    </fieldset>;
+  }
+  function lines(value) { return value === '' ? [] : value.split(/\r?\n/); }
+  return <div className="review-structured-editor">
+    <label>Classification<select value={recommendation.classification} onChange={(event) => update('classification', event.target.value)}>
+      <option value="authentication">Authentication</option>
+      <option value="webhook_delivery">Webhook delivery</option>
+      <option value="insufficient_evidence">Insufficient evidence</option>
+      <option value="other">Other</option>
+    </select></label>
+    <fieldset className="review-observations"><legend>Observations — facts to verify</legend>
+      {recommendation.observations.map((item, index) => <div className="review-observation" key={index}>
+        <label>Observation {index + 1}<textarea maxLength={2000} value={item.text} onChange={(event) => updateObservation(index, { text: event.target.value })} /></label>
+        {renderReferences('Supplied references', item.references, (references) => updateObservation(index, { references }))}
+        <button type="button" onClick={() => update('observations', recommendation.observations.filter((_, itemIndex) => itemIndex !== index))}>Remove observation</button>
+      </div>)}
+      <button type="button" onClick={() => update('observations', [...recommendation.observations, { text: '', references: [] }])}>Add observation</button>
+    </fieldset>
+    <fieldset><legend>Possible cause — hypothesis</legend>
+      {recommendation.possibleCause ? <>
+        <label>Hypothesis<textarea maxLength={2000} value={recommendation.possibleCause.text} onChange={(event) => update('possibleCause', { ...recommendation.possibleCause, text: event.target.value })} /></label>
+        {renderReferences('Supplied references', recommendation.possibleCause.references, (references) => update('possibleCause', { ...recommendation.possibleCause, references }))}
+        <button type="button" onClick={() => update('possibleCause', null)}>Remove hypothesis</button>
+      </> : <button type="button" onClick={() => update('possibleCause', { text: '', references: [] })}>Add hypothesis</button>}
+    </fieldset>
+    <label>Recommended next steps — not executed<textarea maxLength={20000} value={recommendation.nextSteps.join('\n')} onChange={(event) => update('nextSteps', lines(event.target.value))} /></label>
+    <label>Customer-response draft<textarea maxLength={10000} value={recommendation.draftResponse} onChange={(event) => update('draftResponse', event.target.value)} /></label>
+    <label>Uncertainty and missing information — one item per line<textarea maxLength={10000} value={recommendation.uncertainty.join('\n')} onChange={(event) => update('uncertainty', lines(event.target.value))} /></label>
+    {renderReferences('Overall supplied references', recommendation.references, (references) => update('references', references))}
+  </div>;
+}
+
+function ReviewEvaluation({ quality, error }) {
+  if (error) return <p className="notice notice-error" role="alert">{error}</p>;
+  if (!quality) return <p className="field-hint" role="status">Loading review totals…</p>;
+  const totals = quality.totals;
+  return (
+    <section className="review-evaluation" aria-labelledby="review-evaluation-title">
+      <div><h2 id="review-evaluation-title">Human review evaluation</h2><p>Source-separated latest decisions · synthetic demonstration data</p></div>
+      <div className="evaluation-totals">
+        {['fixture', 'live'].map((source) => (
+          <article key={source}>
+            <h3>{source === 'fixture' ? 'Offline evaluation fixtures' : 'Live model inference'}</h3>
+            <p>{totals[source].reviewed} reviewed · {totals[source].accepted} accepted · {totals[source].edited} edited · {totals[source].rejected} rejected</p>
+          </article>
+        ))}
+      </div>
+      <p className="field-hint">Fixture outcomes are scripted teaching examples, not evidence of real-model accuracy.</p>
+      <details>
+        <summary>Inspect review history ({quality.history.length})</summary>
+        {quality.history.length ? <ol className="review-history-list">{quality.history.map((review) => (
+          <li key={review.id}>
+            <div><strong>{displayValue(review.decision)}</strong> · {review.source === 'fixture' ? review.fixtureLabel : `Live inference${review.returnedModel ? ` · ${review.returnedModel}` : ''}`}</div>
+            <p>Case {review.caseId} · analysis {review.analysisId} · {formatDate(review.createdAt)}</p>
+            {review.feedback && <blockquote>{review.feedback}</blockquote>}
+            {review.recommendation?.draftResponse && <blockquote>Reviewed draft: {review.recommendation.draftResponse}</blockquote>}
+            <a href={'#' + encodeURIComponent(review.caseId)}>Open case {review.caseId}</a>
+          </li>
+        ))}</ol> : <p>No recommendations have been reviewed.</p>}
+      </details>
+    </section>
+  );
 }
 
 function DiagnosticFacts({ diagnostic }) {
@@ -144,6 +296,13 @@ function App() {
   const [knowledgeEntries, setKnowledgeEntries] = useState([]);
   const [knowledgeEntry, setKnowledgeEntry] = useState(null);
   const [knowledgeError, setKnowledgeError] = useState('');
+  const [liveInferenceAvailable, setLiveInferenceAvailable] = useState(null);
+  const [configError, setConfigError] = useState('');
+  const [reviewQuality, setReviewQuality] = useState(null);
+  const [reviewQualityError, setReviewQualityError] = useState('');
+  const [analysisDetails, setAnalysisDetails] = useState({});
+  const [editingAnalysisId, setEditingAnalysisId] = useState('');
+  const [analysisPollError, setAnalysisPollError] = useState('');
   const diagnosticSearchRequestRef = useRef(0);
   const diagnosticDetailRequestRef = useRef(0);
   const knowledgeRequestRef = useRef(0);
@@ -156,6 +315,17 @@ function App() {
       })
       .then(({ entries }) => setKnowledgeEntries(entries))
       .catch(() => setKnowledgeError('The knowledge base could not be loaded. Case work remains available.'));
+  }, []);
+
+  useEffect(() => {
+    fetch('/api/config')
+      .then(async (response) => {
+        if (!response.ok) throw new Error('config_unavailable');
+        return response.json();
+      })
+      .then((config) => setLiveInferenceAvailable(config.liveInferenceAvailable))
+      .catch(() => setConfigError('Live inference availability could not be checked. Offline evaluation fixtures remain available.'));
+    refreshReviewQuality();
   }, []);
 
   function applyCaseDetail(item, generation) {
@@ -246,6 +416,27 @@ function App() {
       });
     return () => controller.abort();
   }, [selectedId]);
+
+  const runningAnalysisKey = selectedCase?.id === selectedId
+    ? selectedCase.analyses.filter((analysis) => analysis.status === 'running').map((analysis) => analysis.id).join(',')
+    : '';
+
+  useEffect(() => {
+    if (!selectedId || !runningAnalysisKey) return undefined;
+    let stopped = false;
+    let timer;
+    const poll = async () => {
+      try {
+        await refreshCase(selectedId);
+        if (!stopped) setAnalysisPollError('');
+      } catch {
+        if (!stopped) setAnalysisPollError('The live analysis is still saved, but its status could not be refreshed. No second inference was sent.');
+      }
+      if (!stopped) timer = setTimeout(poll, 900);
+    };
+    timer = setTimeout(poll, 900);
+    return () => { stopped = true; clearTimeout(timer); };
+  }, [selectedId, runningAnalysisKey]);
 
   function chooseCase(caseId) {
     if (selectedIdRef.current === caseId) {
@@ -344,6 +535,35 @@ function App() {
     }
   }
 
+  async function inspectAnalysis(analysisId) {
+    setAnalysisDetails((current) => ({ ...current, [analysisId]: { state: 'loading' } }));
+    try {
+      const response = await fetch('/api/analyses/' + encodeURIComponent(analysisId));
+      const body = await response.json().catch(() => ({}));
+      if (!response.ok) throw new Error(body.error || 'analysis_unavailable');
+      setAnalysisDetails((current) => ({ ...current, [analysisId]: { state: 'ready', analysis: body.analysis } }));
+    } catch {
+      setAnalysisDetails((current) => ({ ...current, [analysisId]: { state: 'error' } }));
+    }
+  }
+
+  async function refreshReviewQuality() {
+    try {
+      const response = await fetch('/api/reviews');
+      const body = await response.json().catch(() => ({}));
+      if (!response.ok) throw new Error(body.error || 'review_history_unavailable');
+      setReviewQuality(body);
+      setReviewQualityError('');
+    } catch {
+      setReviewQualityError('Review totals and history could not be loaded. Case work remains available.');
+    }
+  }
+
+  function inspectReference(reference) {
+    if (reference.kind === 'diagnostic') inspectDiagnostic(reference.id);
+    if (reference.kind === 'knowledge') inspectKnowledge(reference.id);
+  }
+
   function storePending(slot, action) {
     const next = { ...pendingRequestsRef.current, [slot]: action };
     pendingRequestsRef.current = next;
@@ -385,12 +605,21 @@ function App() {
     const body = await response.json().catch(() => ({}));
     if (!response.ok) throw new Error(body.error || 'case_detail_unavailable');
     applyCaseDetail(body.case, generation);
+    return body.case;
   }
 
   function describeFailure(status, code, details = {}) {
     if (status === 409 && code === 'stale_case') return 'This case changed in another view. The action was not applied. Refresh the case and review your saved draft before trying again.';
     if (status === 409 && code === 'idempotency_key_reused') return 'This request key is already tied to different content. The action was not applied; refresh the case before continuing.';
     if (status === 409 && code === 'invalid_transition') return 'That status change is not allowed. The case and your draft were preserved.';
+    if (code === 'analysis_in_progress') return 'Another live analysis is already running for this case. The request was not sent; reload to inspect its status.';
+    if (code === 'invalid_analysis_fixture') return 'This fixture’s prerequisites are not met. Associate the required evidence or choose the matching case.';
+    if (code === 'unsupported_references') {
+      const ids = Array.isArray(details) ? [...new Set(details.map((item) => item.kind + ' · ' + item.id))] : [];
+      return 'Approval is blocked because these references were not supplied: ' + (ids.join(', ') || 'unsupported evidence') + '. You can reject it and record corrective feedback.';
+    }
+    if (code === 'analysis_context_too_large') return 'The saved context is over the 100 KiB limit. Add no further data and review the case before retrying.';
+    if (code === 'live_inference_unavailable') return 'No server-side OpenAI API key is configured. Use an explicitly labeled offline evaluation fixture or manual workflow.';
     if (code === 'evidence_association_rejected') {
       const problems = [];
       if (details.notFoundIds?.length) problems.push('not found: ' + details.notFoundIds.join(', '));
@@ -488,7 +717,45 @@ function App() {
             : current;
         });
       }
-      const refreshResults = await Promise.allSettled([refreshQueue(), refreshCase(action.caseId)]);
+      if (action.type === 'review') {
+        setDrafts((current) => {
+          const draft = current[action.caseId] || {};
+          const feedback = { ...(draft.reviewFeedbackByAnalysis || {}) };
+          const responses = { ...(draft.reviewDraftByAnalysis || {}) };
+          const recommendations = { ...(draft.reviewRecommendationByAnalysis || {}) };
+          if (feedback[action.analysisId] === action.payload.feedback) delete feedback[action.analysisId];
+          if (action.payload.recommendation && (
+            JSON.stringify(recommendations[action.analysisId]) === JSON.stringify(action.payload.recommendation) ||
+            responses[action.analysisId] === action.payload.recommendation.draftResponse
+          )) {
+            delete responses[action.analysisId];
+            delete recommendations[action.analysisId];
+          }
+          const versions = { ...(draft.reviewExpectedVersionByAnalysis || {}) };
+          const needsReconcile = { ...(draft.reviewVersionNeedsReconcileByAnalysis || {}) };
+          if (feedback[action.analysisId] === undefined && responses[action.analysisId] === undefined && recommendations[action.analysisId] === undefined) {
+            delete versions[action.analysisId];
+            delete needsReconcile[action.analysisId];
+          } else {
+            versions[action.analysisId] = body.version;
+            delete needsReconcile[action.analysisId];
+          }
+          return { ...current, [action.caseId]: {
+            ...draft,
+            reviewFeedbackByAnalysis: feedback,
+            reviewDraftByAnalysis: responses,
+            reviewRecommendationByAnalysis: recommendations,
+            reviewExpectedVersionByAnalysis: versions,
+            reviewVersionNeedsReconcileByAnalysis: needsReconcile,
+          } };
+        });
+        if (selectedIdRef.current === action.caseId && editingAnalysisId === action.analysisId) setEditingAnalysisId('');
+      }
+      const refreshResults = await Promise.allSettled([
+        refreshQueue(),
+        refreshCase(action.caseId),
+        ...(action.type === 'review' ? [refreshReviewQuality()] : []),
+      ]);
       const queueRefreshFailed = refreshResults[0].status === 'rejected';
       const detailRefreshFailed = refreshResults[1].status === 'rejected';
       if (queueRefreshFailed) setQueueError('The save succeeded, but the case queue could not be refreshed.');
@@ -587,9 +854,148 @@ function App() {
     sendPending(slot, action);
   }
 
+  function updateReviewDraft(caseId, field, analysisId, value) {
+    setDrafts((current) => {
+      const draft = current[caseId] || {};
+      const versions = { ...(draft.reviewExpectedVersionByAnalysis || {}) };
+      const needsReconcile = { ...(draft.reviewVersionNeedsReconcileByAnalysis || {}) };
+      if (versions[analysisId] === undefined) {
+        if (draft.reviewFeedbackByAnalysis?.[analysisId] || draft.reviewRecommendationByAnalysis?.[analysisId] || draft.reviewDraftByAnalysis?.[analysisId] !== undefined) {
+          needsReconcile[analysisId] = true;
+        } else {
+          versions[analysisId] = activeCase?.version;
+        }
+      }
+      return { ...current, [caseId]: {
+        ...draft,
+        [field]: { ...(draft[field] || {}), [analysisId]: value },
+        reviewExpectedVersionByAnalysis: versions,
+        reviewVersionNeedsReconcileByAnalysis: needsReconcile,
+      } };
+    });
+  }
+
+  function setReviewExpectedVersion(caseId, analysisId, version) {
+    setDrafts((current) => {
+      const draft = current[caseId] || {};
+      const versions = { ...(draft.reviewExpectedVersionByAnalysis || {}), [analysisId]: version };
+      const needsReconcile = { ...(draft.reviewVersionNeedsReconcileByAnalysis || {}) };
+      delete needsReconcile[analysisId];
+      return { ...current, [caseId]: { ...draft, reviewExpectedVersionByAnalysis: versions, reviewVersionNeedsReconcileByAnalysis: needsReconcile } };
+    });
+  }
+
+  function toggleReviewEditor(analysis) {
+    if (editingAnalysisId === analysis.id) {
+      setEditingAnalysisId('');
+      return;
+    }
+    if (!activeCase) return;
+    const caseId = activeCase.id;
+    setDrafts((current) => {
+      const draft = current[caseId] || {};
+      const legacyResponse = draft.reviewDraftByAnalysis?.[analysis.id];
+      const existingRecommendation = draft.reviewRecommendationByAnalysis?.[analysis.id];
+      const feedback = draft.reviewFeedbackByAnalysis?.[analysis.id];
+      const versions = { ...(draft.reviewExpectedVersionByAnalysis || {}) };
+      const needsReconcile = { ...(draft.reviewVersionNeedsReconcileByAnalysis || {}) };
+      if (versions[analysis.id] === undefined && (existingRecommendation || legacyResponse !== undefined || feedback)) {
+        needsReconcile[analysis.id] = true;
+      } else if (versions[analysis.id] === undefined) {
+        versions[analysis.id] = activeCase.version;
+      }
+      const recommendations = { ...(draft.reviewRecommendationByAnalysis || {}) };
+      if (!recommendations[analysis.id]) {
+        recommendations[analysis.id] = {
+          ...analysis.recommendation,
+          draftResponse: legacyResponse ?? analysis.recommendation.draftResponse,
+        };
+      }
+      return { ...current, [caseId]: {
+        ...draft,
+        reviewRecommendationByAnalysis: recommendations,
+        reviewExpectedVersionByAnalysis: versions,
+        reviewVersionNeedsReconcileByAnalysis: needsReconcile,
+      } };
+    });
+    setEditingAnalysisId(analysis.id);
+  }
+
+  function submitAnalysis(source, fixtureId) {
+    if (!activeCase || selectedIdRef.current !== activeCase.id) return;
+    const caseId = activeCase.id;
+    const slot = caseId + ':analysis';
+    const payload = { source, expectedVersion: activeCase.version, ...(fixtureId ? { fixtureId } : {}) };
+    const action = {
+      caseId,
+      type: 'analysis',
+      method: 'POST',
+      path: '/api/cases/' + encodeURIComponent(caseId) + '/analyses',
+      key: crypto.randomUUID(),
+      payload,
+      state: 'uncertain',
+    };
+    storePending(slot, action);
+    sendPending(slot, action);
+  }
+
+  function submitReview(analysis, decision) {
+    if (!activeCase || selectedIdRef.current !== activeCase.id) return;
+    const caseId = activeCase.id;
+    const reviewDrafts = drafts[caseId] || {};
+    const expectedReviewVersion = reviewDrafts.reviewExpectedVersionByAnalysis?.[analysis.id];
+    const hasUnsavedReviewDraft = Boolean(
+      reviewDrafts.reviewFeedbackByAnalysis?.[analysis.id] ||
+      reviewDrafts.reviewRecommendationByAnalysis?.[analysis.id] ||
+      reviewDrafts.reviewDraftByAnalysis?.[analysis.id],
+    );
+    if (decision !== 'accept' && (reviewDrafts.reviewVersionNeedsReconcileByAnalysis?.[analysis.id] || (expectedReviewVersion === undefined && hasUnsavedReviewDraft))) {
+      if (expectedReviewVersion === undefined && hasUnsavedReviewDraft) {
+        setDrafts((current) => {
+          const draft = current[caseId] || {};
+          return { ...current, [caseId]: { ...draft, reviewVersionNeedsReconcileByAnalysis: { ...(draft.reviewVersionNeedsReconcileByAnalysis || {}), [analysis.id]: true } } };
+        });
+      }
+      setFeedback((current) => ({ ...current, [caseId + ':review:' + analysis.id]: 'This saved review draft predates version tracking. Reconcile it with the current case before submitting.' }));
+      return;
+    }
+    const payload = { decision, expectedVersion: decision === 'accept' ? activeCase.version : expectedReviewVersion ?? activeCase.version };
+    if (decision === 'reject') payload.feedback = reviewDrafts.reviewFeedbackByAnalysis?.[analysis.id] || '';
+    if (decision === 'edit') {
+      payload.recommendation = reviewDrafts.reviewRecommendationByAnalysis?.[analysis.id] || {
+        ...analysis.recommendation,
+        draftResponse: reviewDrafts.reviewDraftByAnalysis?.[analysis.id] ?? analysis.recommendation.draftResponse,
+      };
+    }
+    const slot = caseId + ':review:' + analysis.id;
+    const action = {
+      caseId,
+      analysisId: analysis.id,
+      type: 'review',
+      method: 'POST',
+      path: '/api/cases/' + encodeURIComponent(caseId) + '/analyses/' + encodeURIComponent(analysis.id) + '/reviews',
+      key: crypto.randomUUID(),
+      payload,
+      state: 'uncertain',
+    };
+    storePending(slot, action);
+    sendPending(slot, action);
+  }
+
+  function useReviewedDraft(analysis, replace) {
+    const reviewSlot = activeCase?.id + ':review:' + analysis.id;
+    const replySlot = activeCase?.id + ':activity:simulated_reply';
+    if (analysis.referenceValidation?.valid === false || !['accepted', 'edited'].includes(analysis.latestReview?.decision) || !analysis.latestReview?.recommendation || busySlot || pendingRequests[reviewSlot] || pendingRequests[replySlot]) return false;
+    if (replace || !(selectedDraft.replyText || '').trim()) updateDraft(activeCase.id, 'replyText', analysis.latestReview.recommendation.draftResponse);
+    return true;
+  }
+
   async function reconcileConflict(slot, action) {
     try {
-      await refreshCase(action.caseId);
+      const latest = await refreshCase(action.caseId);
+      if (action.type === 'review' && latest?.analyses?.some((item) => item.id === action.analysisId)) {
+        setReviewExpectedVersion(action.caseId, action.analysisId, latest.version);
+      }
       clearPending(slot);
       await refreshQueue().catch(() => setQueueError('The case history refreshed, but the queue could not be updated.'));
       setFeedback((current) => ({ ...current, [slot]: 'Latest case history loaded. Your draft remains available for review.' }));
@@ -627,7 +1033,7 @@ function App() {
           <span className="brand-mark" aria-hidden="true">S</span>
           <span>Support Engineering Workbench</span>
         </a>
-        <span className="mode-label">M3 diagnostic investigation · no AI credentials needed</span>
+        <span className="mode-label">M4 supervised analysis · fictional cases and simulated replies</span>
       </header>
 
       <main className="workspace">
@@ -654,6 +1060,8 @@ function App() {
             </select>
           </label>
         </div>
+
+        <ReviewEvaluation quality={reviewQuality} error={reviewQualityError} />
 
         {queueError && <p className="notice notice-error" role="alert">{queueError}</p>}
         {loadState === 'loading' && <p className="notice">Loading synthetic cases…</p>}
@@ -842,6 +1250,140 @@ function App() {
                       )}
                     </section>
                   )}
+                </section>
+
+                <section className="analysis-section" aria-labelledby="analysis-title">
+                  <div className="section-heading">
+                    <div><h3 id="analysis-title">AI-assisted troubleshooting</h3><p className="field-hint">Review the saved context, separate observations from hypotheses, and approve only a supported recommendation. No analysis sends a message or changes case status.</p></div>
+                    <span>{activeCase.analyses.length} saved analyses</span>
+                  </div>
+                  <div className="analysis-controls">
+                    <div className="live-analysis-control">
+                      <strong>Live model inference</strong>
+                      {liveInferenceAvailable === true
+                        ? <p className="field-hint">Configured on the server. The returned model and response ID are saved; the app never falls back to another model.</p>
+                        : liveInferenceAvailable === false
+                          ? <p className="field-hint">Not configured. Set OPENAI_API_KEY on the server; OPENAI_MODEL is optional and defaults to gpt-6.1-sol. No credential is needed for fixtures or manual work.</p>
+                          : <p className="field-hint">{configError || 'Checking server-side inference availability…'}</p>}
+                      <button type="button" onClick={() => submitAnalysis('live')} disabled={liveInferenceAvailable !== true || Boolean(busySlot) || Boolean(pendingRequests[activeCase.id + ':analysis']) || activeCase.analyses.some((item) => item.source === 'live' && item.status === 'running')}>
+                        Generate live analysis
+                      </button>
+                    </div>
+                    <div className="fixture-controls">
+                      <strong>Offline evaluation fixtures</strong>
+                      <p className="field-hint">These are explicit synthetic examples, not OpenAI model results.</p>
+                      {activeCase.analysisFixtures.map((fixture) => (
+                        <article className="fixture-option" key={fixture.id}>
+                          <div><strong>{fixture.title}</strong><p className="field-hint">{fixture.label}</p>{fixture.prerequisite && <p className="field-hint">{fixture.prerequisite}</p>}</div>
+                          <button type="button" onClick={() => submitAnalysis('fixture', fixture.id)} disabled={!fixture.available || Boolean(busySlot) || Boolean(pendingRequests[activeCase.id + ':analysis'])}>
+                            Load evaluation fixture
+                          </button>
+                        </article>
+                      ))}
+                    </div>
+                  </div>
+                  {analysisPollError && <p className="notice notice-error" role="alert">{analysisPollError}</p>}
+                  {pendingRequests[activeCase.id + ':analysis'] && <PendingAction slot={activeCase.id + ':analysis'} action={pendingRequests[activeCase.id + ':analysis']} busySlot={busySlot} feedback={feedback} retry={sendPending} reconcile={reconcileConflict} />}
+                  {!pendingRequests[activeCase.id + ':analysis'] && feedback[activeCase.id + ':analysis'] && <p className="save-feedback" role="status">{feedback[activeCase.id + ':analysis']}</p>}
+                  {activeCase.analyses.length === 0 && <p className="empty-diagnostics">No analysis has been saved for this case.</p>}
+                  <ol className="analysis-list">
+                    {activeCase.analyses.map((analysis) => {
+                      const reviewSlot = activeCase.id + ':review:' + analysis.id;
+                      const reviewPending = pendingRequests[reviewSlot];
+                      const unsupported = analysis.referenceValidation?.valid === false;
+                      const reviewDraft = selectedDraft.reviewRecommendationByAnalysis?.[analysis.id] || {
+                        ...analysis.recommendation,
+                        draftResponse: selectedDraft.reviewDraftByAnalysis?.[analysis.id] ?? analysis.recommendation?.draftResponse ?? '',
+                      };
+                      const reviewDraftValid = validateRecommendation(reviewDraft).success;
+                      const reviewFeedback = selectedDraft.reviewFeedbackByAnalysis?.[analysis.id] || '';
+                      const detail = analysisDetails[analysis.id];
+                      const approved = analysis.referenceValidation?.valid !== false && ['accepted', 'edited'].includes(analysis.latestReview?.decision) && analysis.latestReview?.recommendation;
+                      const replyDraftExists = Boolean((selectedDraft.replyText || '').trim());
+                      const replySlot = activeCase.id + ':activity:simulated_reply';
+                      const replyPending = pendingRequests[replySlot];
+                      const reviewVersionNeedsReconcile = selectedDraft.reviewVersionNeedsReconcileByAnalysis?.[analysis.id];
+                      return (
+                        <li className="analysis-card" key={analysis.id}>
+                          <div className="analysis-card-heading">
+                            <div><strong>{analysis.id}</strong><p>{analysis.source === 'fixture' ? `${analysis.fixtureLabel} · v${analysis.fixtureVersion}` : 'Live model inference'}</p></div>
+                            <span className={'analysis-state analysis-state-' + analysis.status}>{displayValue(analysis.status)}</span>
+                          </div>
+                          <p className="field-hint">Snapshot captured {formatDate(analysis.createdAt)} at case version {analysis.capturedCaseVersion}. {analysis.status === 'running' ? 'Live inference is running; this page polls the saved analysis without resending it.' : ''}</p>
+                          {analysis.source === 'live' && (
+                            <dl className="analysis-provenance">
+                              {analysis.provider && <div><dt>Provider</dt><dd>{analysis.provider}</dd></div>}
+                              {analysis.requestedModel && <div><dt>Requested model</dt><dd>{analysis.requestedModel}</dd></div>}
+                              {analysis.returnedModel && <div><dt>Returned model</dt><dd>{analysis.returnedModel}</dd></div>}
+                              {analysis.responseId && <div><dt>Response ID</dt><dd>{analysis.responseId}</dd></div>}
+                            </dl>
+                          )}
+                          {analysis.status === 'completed' && analysis.recommendation && <>
+                            <p><strong>Suspected category:</strong> {displayValue(analysis.recommendation.classification)}</p>
+                            <RecommendationContent analysis={analysis} onInspectReference={inspectReference} />
+                          </>}
+                          {analysis.status === 'running' && (analysis.completionPending
+                            ? <p className="notice notice-error" role="status">The provider result is durably staged, but its completion write is pending. Refreshing retries persistence only; it will not send another inference.</p>
+                            : analysis.volatileCompletionPending
+                              ? <p className="notice notice-error" role="status">The provider result was received but could not be saved durably. It is held temporarily in this server process and could be lost if the process stops. Refreshing retries the save without sending another inference.</p>
+                              : <p role="status">Waiting for the configured model response. Refreshing this page will not resend it.</p>)}
+                          {analysis.status !== 'completed' && analysis.status !== 'running' && <p className="analysis-failure" role="status">No recommendation was saved ({analysis.failureCode || analysis.status}). Review the failure, then deliberately start a new analysis if appropriate.</p>}
+                          <button type="button" onClick={() => inspectAnalysis(analysis.id)} disabled={detail?.state === 'loading'}>Inspect saved context</button>
+                          {detail?.state === 'loading' && <p role="status">Loading saved context…</p>}
+                          {detail?.state === 'error' && <p className="notice notice-error" role="alert">The saved analysis context could not be loaded.</p>}
+                          {detail?.state === 'ready' && <details className="saved-context" open>
+                            <summary>Supplied context and reference allowlist</summary>
+                            <p className="field-hint">This is the exact case snapshot supplied for the analysis. Later notes or evidence are not included.</p>
+                            <dl><div><dt>Allowed diagnostic IDs</dt><dd>{detail.analysis.referenceAllowlist.diagnostics.join(', ') || 'None'}</dd></div><div><dt>Allowed knowledge IDs</dt><dd>{detail.analysis.referenceAllowlist.knowledge.join(', ') || 'None'}</dd></div></dl>
+                            <pre>{JSON.stringify(detail.analysis.context, null, 2)}</pre>
+                            {detail.analysis.requestEnvelope && <details><summary>Inspect saved credential-free request envelope and settings</summary><pre>{JSON.stringify(detail.analysis.requestEnvelope, null, 2)}</pre></details>}
+                          </details>}
+                          {analysis.reviews.length > 0 && <section className="analysis-review-history" aria-label={'Review history for ' + analysis.id}>
+                            <h5>Append-only review history</h5>
+                            <ol>{analysis.reviews.map((review) => <li key={review.id}>
+                              <strong>{displayValue(review.decision)}</strong> · {formatDate(review.createdAt)} · case version {review.caseVersion}
+                              {review.feedback && <p>{review.feedback}</p>}
+                              {review.recommendation && <details><summary>Inspect reviewed recommendation</summary><ReviewedRecommendationContent recommendation={review.recommendation} /></details>}
+                            </li>)}</ol>
+                          </section>}
+                          {analysis.status === 'completed' && analysis.recommendation && <section className="analysis-review-controls" aria-label={'Review ' + analysis.id}>
+                            <h5>Human review</h5>
+                            {unsupported && <p className="notice notice-error" role="alert">This original output is quarantined because it cites data outside the saved context. Acceptance, edited approval, and reviewed-draft reuse are blocked. Reject it with corrective feedback, then reanalyze.</p>}
+                            <div className="review-buttons">
+                              <button type="button" onClick={() => submitReview(analysis, 'accept')} disabled={unsupported || Boolean(busySlot) || Boolean(reviewPending)}>Accept recommendation</button>
+                              <button type="button" onClick={() => toggleReviewEditor(analysis)} disabled={unsupported || Boolean(busySlot) || Boolean(reviewPending)}>
+                                {editingAnalysisId === analysis.id ? 'Close edit' : 'Edit draft and approve'}
+                              </button>
+                            </div>
+                            {reviewVersionNeedsReconcile && <p className="notice notice-error" role="alert">This saved review draft has no captured case version. Reconcile it explicitly before submitting.</p>}
+                            {reviewVersionNeedsReconcile && <button type="button" onClick={() => setReviewExpectedVersion(activeCase.id, analysis.id, activeCase.version)} disabled={Boolean(busySlot) || Boolean(reviewPending)}>Reconcile saved review draft with case version {activeCase.version}</button>}
+                            {editingAnalysisId === analysis.id && !unsupported && <div className="review-edit-form">
+                              <RecommendationEditor recommendation={reviewDraft} allowlist={analysis.referenceAllowlist} onChange={(value) => updateReviewDraft(activeCase.id, 'reviewRecommendationByAnalysis', analysis.id, value)} />
+                              {!reviewDraftValid && <p className="notice notice-error" role="alert">Complete each required structured field with nonblank text before approval.</p>}
+                              <button type="button" onClick={() => submitReview(analysis, 'edit')} disabled={!reviewDraftValid || reviewVersionNeedsReconcile || Boolean(busySlot) || Boolean(reviewPending)}>Save edited recommendation as approved</button>
+                            </div>}
+                            <label htmlFor={'review-feedback-' + analysis.id}>Reason or corrective feedback</label>
+                            <textarea id={'review-feedback-' + analysis.id} maxLength={10000} value={reviewFeedback} onChange={(event) => updateReviewDraft(activeCase.id, 'reviewFeedbackByAnalysis', analysis.id, event.target.value, activeCase.version)} />
+                            <button type="button" className="reject-button" onClick={() => submitReview(analysis, 'reject')} disabled={!reviewFeedback.trim() || reviewVersionNeedsReconcile || Boolean(busySlot) || Boolean(reviewPending)}>Reject recommendation and record correction</button>
+                            {reviewPending && <PendingAction slot={reviewSlot} action={reviewPending} busySlot={busySlot} feedback={feedback} retry={sendPending} reconcile={reconcileConflict} />}
+                            {!reviewPending && feedback[reviewSlot] && <p className="save-feedback" role="status">{feedback[reviewSlot]}</p>}
+                          </section>}
+                          {approved && <div className="reviewed-draft-actions">
+                            <p><strong>Reviewed draft approved.</strong> Copying it only fills the composer; it does not create a message.</p>
+                            <button type="button" onClick={() => {
+                              if (!useReviewedDraft(analysis, replyDraftExists)) return;
+                              setFeedback((current) => ({ ...current, [activeCase.id + ':reviewed-draft']: replyDraftExists
+                                ? 'The reviewed draft replaced the existing unsent text. It is still not recorded or sent.'
+                                : 'Copied into the unsent reply composer. Use Record simulated reply to save it to case history.' }));
+                            }} disabled={Boolean(busySlot) || Boolean(reviewPending) || Boolean(replyPending)}>
+                              {replyDraftExists ? 'Replace unsent draft with reviewed draft' : 'Use reviewed draft'}
+                            </button>
+                            {feedback[activeCase.id + ':reviewed-draft'] && <p role="status">{feedback[activeCase.id + ':reviewed-draft']}</p>}
+                          </div>}
+                        </li>
+                      );
+                    })}
+                  </ol>
                 </section>
 
                 <section className="knowledge-section" aria-labelledby="knowledge-title">
@@ -1041,7 +1583,9 @@ function PendingAction({ slot, action, busySlot, feedback, retry, reconcile }) {
   return (
     <div className="pending-action">
       <p>{action.state === 'conflict' ? 'This request was rejected and will not be retried automatically.' : 'A previous save is awaiting confirmation. The exact request is retained.'}</p>
-      {action.type !== 'status' && <blockquote>{action.payload.text}</blockquote>}
+      {['internal_note', 'simulated_reply'].includes(action.type) && <blockquote>{action.payload.text}</blockquote>}
+      {action.type === 'analysis' && <blockquote>Submitted {action.payload.source} analysis request{action.payload.fixtureId ? ` for ${action.payload.fixtureId}` : ''}.</blockquote>}
+      {action.type === 'review' && <blockquote>Submitted {action.payload.decision} review{action.payload.feedback ? `: ${action.payload.feedback}` : ''}</blockquote>}
       {action.type === 'status' && action.payload.status === 'resolved' && (
         <blockquote>Submitted resolution outcome: {action.payload.outcome}</blockquote>
       )}
@@ -1053,7 +1597,7 @@ function PendingAction({ slot, action, busySlot, feedback, retry, reconcile }) {
       )}
       {feedback[slot] && <p role="alert">{feedback[slot]}</p>}
       {action.state === 'conflict' ? (
-        <button type="button" onClick={() => reconcile(slot, action)} disabled={Boolean(busySlot)}>Reload case and review draft</button>
+        <button type="button" onClick={() => reconcile(slot, action)} disabled={Boolean(busySlot)}>{action.type === 'review' ? 'Reload case and rebase review draft' : 'Reload case and review draft'}</button>
       ) : (
         <button type="button" onClick={() => retry(slot, action)} disabled={Boolean(busySlot)}>Retry exact save</button>
       )}

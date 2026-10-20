@@ -4,7 +4,16 @@ import { dirname, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import {
   appendCaseActivity,
+  appendAnalysisReview,
   associateCaseEvidence,
+  AnalysisContextTooLargeError,
+  AnalysisContextIntegrityError,
+  AnalysisInProgressError,
+  AnalysisNotFoundError,
+  AnalysisNotReadyError,
+  getAnalysis,
+  finishAnalysis,
+  stageAnalysisResult,
   CaseNotFoundError,
   changeCaseStatus,
   getDiagnostic,
@@ -16,12 +25,20 @@ import {
   InvalidEscalationEvidenceError,
   InvalidStatusContextError,
   listCases,
+  listCaseAnalyses,
+  listReviewQuality,
   listKnowledgeEntries,
   searchDiagnostics,
   runIdempotentMutation,
+  reserveAnalysis,
   StaleCaseError,
+  UnsupportedAnalysisReferencesError,
+  InvalidAnalysisFixtureError,
+  InvalidReviewError,
 } from './database.js';
 import { z } from 'zod';
+import { recommendationSchema } from '../shared/recommendation.js';
+import { analysisPromptVersion } from './ai.js';
 
 const serverDirectory = dirname(fileURLToPath(import.meta.url));
 const defaultBuildDirectory = resolve(serverDirectory, '../dist');
@@ -62,6 +79,15 @@ const statusBodySchema = z.discriminatedUnion('status', [
     outcome: boundedTextSchema.optional(),
   }),
 ]);
+const analysisBodySchema = z.discriminatedUnion('source', [
+  z.strictObject({ source: z.literal('live'), expectedVersion: expectedVersionSchema }),
+  z.strictObject({ source: z.literal('fixture'), fixtureId: caseIdSchema, expectedVersion: expectedVersionSchema }),
+]);
+const reviewBodySchema = z.discriminatedUnion('decision', [
+  z.strictObject({ decision: z.literal('accept'), expectedVersion: expectedVersionSchema }),
+  z.strictObject({ decision: z.literal('edit'), expectedVersion: expectedVersionSchema, recommendation: recommendationSchema }),
+  z.strictObject({ decision: z.literal('reject'), expectedVersion: expectedVersionSchema, feedback: nonblankTextSchema }),
+]);
 
 class RequestValidationError extends Error {
   constructor(code) {
@@ -69,6 +95,10 @@ class RequestValidationError extends Error {
     this.code = code;
     this.status = 400;
   }
+}
+
+class LiveInferenceUnavailableError extends Error {
+  constructor() { super('Live inference is not configured.'); this.code = 'live_inference_unavailable'; }
 }
 
 function parseRequest(schema, value, codes) {
@@ -116,17 +146,33 @@ function validateStatusBody(body) {
   });
 }
 
+function validateAnalysisBody(body) {
+  return parseRequest(analysisBodySchema, body, { source: 'invalid_analysis_source', fixtureId: 'invalid_analysis_fixture', expectedVersion: 'invalid_expected_version' });
+}
+
+function validateReviewBody(body) {
+  return parseRequest(reviewBodySchema, body, { decision: 'invalid_review', expectedVersion: 'invalid_expected_version', recommendation: 'invalid_recommendation', feedback: 'invalid_review_feedback' });
+}
+
 function sendMutationError(res, error) {
   if (error instanceof RequestValidationError) {
     return res.status(error.status).json({ error: error.code });
   }
   if (error instanceof CaseNotFoundError) return res.status(404).json({ error: error.code });
+  if (error instanceof AnalysisNotFoundError) return res.status(404).json({ error: error.code });
   if (error instanceof InvalidEvidenceAssociationError) {
     return res.status(400).json({ error: error.code, details: error.details });
   }
   if (error instanceof IdempotencyKeyReusedError || error instanceof StaleCaseError || error instanceof InvalidCaseTransitionError) {
     return res.status(409).json({ error: error.code });
   }
+  if (error instanceof AnalysisInProgressError || error instanceof AnalysisNotReadyError || error instanceof InvalidAnalysisFixtureError || error instanceof UnsupportedAnalysisReferencesError) {
+    return res.status(409).json({ error: error.code, ...(error.details ? { details: error.details } : {}) });
+  }
+  if (error instanceof AnalysisContextIntegrityError) return res.status(409).json({ error: error.code });
+  if (error instanceof LiveInferenceUnavailableError) return res.status(503).json({ error: error.code });
+  if (error instanceof AnalysisContextTooLargeError) return res.status(413).json({ error: error.code });
+  if (error instanceof InvalidReviewError) return res.status(400).json({ error: error.code });
   if (error instanceof InvalidEscalationEvidenceError || error instanceof InvalidStatusContextError) {
     return res.status(400).json(error instanceof InvalidEscalationEvidenceError
       ? { error: error.code, details: error.details }
@@ -149,9 +195,10 @@ function sameOrigin(req) {
   }
 }
 
-export function createApp({ db, buildDirectory = defaultBuildDirectory }) {
+export function createApp({ db, buildDirectory = defaultBuildDirectory, analyze = null }) {
   if (!db) throw new TypeError('A database connection is required.');
   const app = express();
+  const volatileCompletionResults = new Map();
   app.disable('x-powered-by');
 
   app.use((req, res, next) => {
@@ -168,7 +215,7 @@ export function createApp({ db, buildDirectory = defaultBuildDirectory }) {
   app.use(express.json({ limit: '64kb', strict: true }));
 
   app.get('/api/config', (_req, res) => {
-    res.json({ name: 'Support Engineering Workbench', dataMode: 'synthetic' });
+    res.json({ name: 'Support Engineering Workbench', dataMode: 'synthetic', liveInferenceAvailable: Boolean(analyze) });
   });
 
   app.get('/api/cases', (req, res) => {
@@ -183,14 +230,146 @@ export function createApp({ db, buildDirectory = defaultBuildDirectory }) {
     }
   });
 
+  function retryCompletion(analysisId) {
+    const volatileResult = volatileCompletionResults.get(analysisId);
+    if (volatileResult) {
+      try {
+        const staged = stageAnalysisResult(db, { analysisId, result: volatileResult });
+        volatileCompletionResults.delete(analysisId);
+        if (!staged.applied) return;
+      } catch {
+        return;
+      }
+    }
+    try { finishAnalysis(db, { analysisId }); } catch {
+      // Retain the staged result; the next read retries persistence without inference.
+    }
+  }
+
+  function persistInferenceResult(analysisId, result) {
+    try {
+      const staged = stageAnalysisResult(db, { analysisId, result });
+      if (!staged.applied) return;
+      finishAnalysis(db, { analysisId });
+    } catch {
+      volatileCompletionResults.set(analysisId, result);
+    }
+  }
+
   app.get('/api/cases/:caseId', (req, res) => {
     if (!caseIdPattern.test(req.params.caseId)) return res.status(400).json({ error: 'invalid_case_id' });
     try {
+      for (const analysis of listCaseAnalyses(db, req.params.caseId)) {
+        if (analysis.status === 'running' && (analysis.completionPending || volatileCompletionResults.has(analysis.id))) retryCompletion(analysis.id);
+      }
       const item = getCase(db, req.params.caseId);
       if (!item) return res.status(404).json({ error: 'case_not_found' });
+      item.analyses = item.analyses.map((analysis) => ({
+        ...analysis,
+        volatileCompletionPending: volatileCompletionResults.has(analysis.id),
+      }));
       res.json({ case: item });
     } catch {
       res.status(500).json({ error: 'case_detail_unavailable' });
+    }
+  });
+
+  app.get('/api/analyses/:analysisId', (req, res) => {
+    if (!caseIdPattern.test(req.params.analysisId)) return res.status(400).json({ error: 'invalid_analysis_id' });
+    try {
+      let analysis = getAnalysis(db, req.params.analysisId);
+      if (!analysis) return res.status(404).json({ error: 'analysis_not_found' });
+      if (analysis.status === 'running' && (analysis.completionPending || volatileCompletionResults.has(analysis.id))) {
+        retryCompletion(analysis.id);
+        analysis = getAnalysis(db, req.params.analysisId);
+      }
+      analysis.volatileCompletionPending = volatileCompletionResults.has(analysis.id);
+      res.json({ analysis });
+    } catch {
+      res.status(500).json({ error: 'analysis_unavailable' });
+    }
+  });
+
+  app.get('/api/reviews', (_req, res) => {
+    try {
+      res.json(listReviewQuality(db));
+    } catch {
+      res.status(500).json({ error: 'review_history_unavailable' });
+    }
+  });
+
+  app.post('/api/cases/:caseId/analyses', (req, res) => {
+    try {
+      validateCaseId(req.params.caseId);
+      const requestKey = req.get('idempotency-key');
+      validateRequestKey(requestKey);
+      const payload = validateAnalysisBody(req.body);
+      const result = runIdempotentMutation(
+        db,
+        { requestKey, method: req.method, route: req.path, caseId: req.params.caseId, payload, expectedVersion: payload.expectedVersion },
+        (connection) => {
+          if (payload.source === 'live' && !analyze) throw new LiveInferenceUnavailableError();
+          return reserveAnalysis(connection, {
+            caseId: req.params.caseId,
+            source: payload.source,
+            fixtureId: payload.fixtureId,
+            promptVersion: analysisPromptVersion,
+            provider: analyze?.provider || null,
+            requestedModel: analyze?.requestedModel || null,
+            buildRequestEnvelope: analyze?.buildRequestEnvelope || null,
+          });
+        },
+      );
+      if (payload.source === 'live' && !result.replayed) {
+        const analysisId = result.response.analysisId;
+        setImmediate(async () => {
+          try {
+            const snapshot = getAnalysis(db, analysisId);
+            if (!snapshot || snapshot.status !== 'running') return;
+            let inference;
+            try {
+              inference = await analyze(snapshot.context, snapshot.requestEnvelope);
+            } catch {
+              inference = {
+                status: 'failed',
+                failureCode: 'provider_unavailable',
+                ...(analyze.provider ? { provider: analyze.provider } : {}),
+                ...(analyze.requestedModel ? { requestedModel: analyze.requestedModel } : {}),
+              };
+            }
+            persistInferenceResult(analysisId, inference);
+          } catch {
+            // A successful provider result is staged separately before terminal persistence.
+          }
+        });
+      }
+      res.status(payload.source === 'fixture' ? 201 : 202).json({ ...result.response, replayed: result.replayed });
+    } catch (error) {
+      sendMutationError(res, error);
+    }
+  });
+
+  app.post('/api/cases/:caseId/analyses/:analysisId/reviews', (req, res) => {
+    try {
+      validateCaseId(req.params.caseId);
+      if (!caseIdPattern.test(req.params.analysisId)) throw new RequestValidationError('invalid_analysis_id');
+      const requestKey = req.get('idempotency-key');
+      validateRequestKey(requestKey);
+      const payload = validateReviewBody(req.body);
+      const result = runIdempotentMutation(
+        db,
+        { requestKey, method: req.method, route: req.path, caseId: req.params.caseId, payload, expectedVersion: payload.expectedVersion },
+        (connection) => appendAnalysisReview(connection, {
+          caseId: req.params.caseId,
+          analysisId: req.params.analysisId,
+          decision: payload.decision,
+          recommendation: payload.recommendation,
+          feedback: payload.feedback,
+        }),
+      );
+      res.json({ ...result.response, replayed: result.replayed });
+    } catch (error) {
+      sendMutationError(res, error);
     }
   });
 

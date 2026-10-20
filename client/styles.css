@@ -203,3 +203,97 @@ blockquote { margin: 0; padding: 16px 18px; border-left: 3px solid #73bdb2; bord
   .section-heading { align-items: start; flex-direction: column; gap: 4px; }
   .activity-heading { align-items: start; flex-direction: column; gap: 4px; }
 }
+
+.review-evaluation, .analysis-section {
+  display: grid; gap: 15px; margin: 0 0 22px; padding: 20px;
+  border: 1px solid var(--line); border-radius: 12px; background: #fff;
+}
+.review-evaluation h2 { margin: 0 0 4px; font-size: 1.12rem; letter-spacing: 0; }
+.review-evaluation > div > p { margin: 0; color: var(--ink-muted); font-size: 0.84rem; }
+.evaluation-totals { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 12px; }
+.evaluation-totals article { padding: 12px; border: 1px solid var(--line); border-radius: 9px; background: #f8fbfb; }
+.evaluation-totals h3 { margin: 0 0 5px; font-size: 0.9rem; }
+.evaluation-totals p { margin: 0; color: #465d69; font-size: 0.83rem; }
+.review-evaluation details, .analysis-card details { padding: 11px; border: 1px solid var(--line); border-radius: 8px; background: #fbfdfd; }
+.review-evaluation summary, .analysis-card summary { cursor: pointer; color: #1c4949; font-weight: 650; }
+.review-history-list, .analysis-list { display: grid; gap: 12px; margin: 0; padding: 0; list-style: none; }
+.review-history-list { margin-top: 12px; }
+.review-history-list > li { display: grid; gap: 8px; padding: 12px; border-bottom: 1px solid var(--line); }
+.review-history-list p { margin: 0; color: var(--ink-muted); font-size: 0.84rem; }
+.review-history-list a { justify-self: start; color: #126660; font-size: 0.85rem; font-weight: 650; }
+.review-history-list blockquote { font-size: 0.85rem; }
+.analysis-section { margin: 0; border-color: #b8d5d2; background: #fbfdfd; }
+.analysis-controls { display: grid; gap: 12px; }
+.live-analysis-control, .fixture-controls { display: grid; gap: 10px; padding: 14px; border: 1px solid var(--line); border-radius: 9px; background: #fff; }
+.live-analysis-control > strong, .fixture-controls > strong { color: #193c46; font-size: 0.92rem; }
+.fixture-option { display: flex; align-items: center; justify-content: space-between; gap: 14px; padding: 12px; border: 1px solid #e2e9ec; border-radius: 8px; background: #fbfdfd; }
+.fixture-option > div { display: grid; gap: 5px; }
+.fixture-option p { margin: 0; }
+.analysis-section button, .review-evaluation button, .review-history-list a {
+  font: inherit;
+}
+.analysis-section button, .analysis-card button, .review-evaluation button {
+  justify-self: start; min-height: 38px; padding: 8px 11px; border: 1px solid #9fb8bd; border-radius: 7px;
+  color: #174b4a; background: #fff; font-size: 0.84rem; font-weight: 650; cursor: pointer;
+}
+.analysis-section button:hover:not(:disabled), .analysis-card button:hover:not(:disabled), .review-evaluation button:hover:not(:disabled) { border-color: var(--accent); background: #eff8f7; }
+.analysis-section button:focus-visible, .analysis-card button:focus-visible, .review-evaluation button:focus-visible { outline: 3px solid #80d4ca; outline-offset: 2px; }
+.analysis-section button:disabled, .analysis-card button:disabled, .review-evaluation button:disabled { opacity: 0.58; cursor: not-allowed; }
+.analysis-list { margin-top: 2px; }
+.analysis-card { display: grid; gap: 13px; padding: 16px; border: 1px solid #cadadd; border-radius: 10px; background: #fff; }
+.analysis-card-heading { display: flex; align-items: start; justify-content: space-between; gap: 12px; }
+.analysis-card-heading p { margin: 4px 0 0; color: var(--ink-muted); font-size: 0.84rem; }
+.analysis-state { padding: 4px 8px; border-radius: 999px; color: #405667; background: #edf2f5; font-size: 0.72rem; font-weight: 700; }
+.analysis-state-running { color: #80531c; background: #fff4d8; }
+.analysis-state-completed { color: #27664f; background: #e1f4eb; }
+.analysis-state-failed, .analysis-state-refused, .analysis-state-incomplete, .analysis-state-interrupted { color: #8b3441; background: #fdecef; }
+.analysis-card > p { margin: 0; line-height: 1.5; }
+.analysis-provenance { display: flex; flex-wrap: wrap; gap: 8px 18px; margin: 0; }
+.analysis-provenance div { min-width: 0; }
+.analysis-provenance dt { color: var(--ink-muted); font-size: 0.72rem; }
+.analysis-provenance dd { overflow-wrap: anywhere; margin: 2px 0 0; font-size: 0.82rem; font-weight: 600; }
+.recommendation-content { display: grid; gap: 14px; padding: 14px; border: 1px solid #e0e8eb; border-radius: 9px; background: #fcfefe; }
+.recommendation-content > .field-hint, .recommendation-content > .notice { margin: 0; }
+.recommendation-content section { display: grid; gap: 6px; }
+.recommendation-content h5, .analysis-review-controls h5, .analysis-review-history h5 { margin: 0; color: #1d3d47; font-size: 0.87rem; }
+.recommendation-content p, .recommendation-content ul, .recommendation-content ol { margin: 0; padding-left: 20px; color: #344c59; font-size: 0.88rem; line-height: 1.55; }
+.recommendation-content section > p { padding-left: 0; }
+.recommendation-content blockquote { padding: 10px 12px; font-size: 0.88rem; }
+.analysis-references { display: flex; flex-wrap: wrap; gap: 6px; margin: 2px 0 0; padding: 0; list-style: none; }
+.analysis-references button { min-height: 30px; padding: 5px 8px; font-size: 0.76rem; }
+.analysis-references .unsupported-reference { display: inline-block; padding: 6px 8px; border: 1px solid #edc6c9; border-radius: 6px; color: #8b3441; background: #fff4f4; font-size: 0.76rem; }
+.saved-context { display: grid; gap: 10px; }
+.saved-context dl { display: grid; gap: 6px; margin: 0; font-size: 0.8rem; }
+.saved-context dt { color: var(--ink-muted); }
+.saved-context dd { overflow-wrap: anywhere; margin: 0; }
+.saved-context pre { overflow: auto; max-height: 420px; margin: 0; padding: 12px; border-radius: 7px; color: #263d49; background: #f1f5f6; font-size: 0.76rem; white-space: pre-wrap; overflow-wrap: anywhere; }
+.analysis-review-history, .analysis-review-controls { display: grid; gap: 10px; padding-top: 12px; border-top: 1px solid var(--line); }
+.analysis-review-history ol { display: grid; gap: 9px; margin: 0; padding-left: 20px; color: #344c59; font-size: 0.84rem; }
+.analysis-review-history li > p { margin: 5px 0; line-height: 1.5; }
+.analysis-review-history blockquote { margin-top: 7px; padding: 9px 11px; font-size: 0.84rem; }
+.analysis-review-controls > .notice { margin: 0; padding: 12px; }
+.review-buttons { display: flex; flex-wrap: wrap; gap: 8px; }
+.review-edit-form { display: grid; gap: 8px; padding: 12px; border: 1px solid var(--line); border-radius: 8px; background: #f8fbfb; }
+.analysis-review-controls > label, .review-edit-form label { color: #344c59; font-size: 0.84rem; font-weight: 650; }
+.analysis-review-controls textarea, .review-edit-form textarea { width: 100%; min-height: 76px; padding: 9px 10px; border: 1px solid #b8c6cd; border-radius: 7px; color: inherit; font: inherit; }
+.review-structured-editor { display: grid; gap: 12px; }
+.review-structured-editor > label { display: grid; gap: 6px; }
+.review-structured-editor select { min-height: 40px; padding: 8px 10px; border: 1px solid #b8c6cd; border-radius: 7px; color: inherit; background: #fff; font: inherit; }
+.review-structured-editor fieldset { display: grid; gap: 8px; min-width: 0; margin: 0; padding: 10px; border: 1px solid var(--line); border-radius: 7px; }
+.review-structured-editor legend { padding: 0 4px; color: #344c59; font-size: 0.84rem; font-weight: 700; }
+.review-observation { display: grid; gap: 8px; padding: 9px; border: 1px solid #d9e1e5; border-radius: 7px; background: #fff; }
+.review-reference-picker { grid-template-columns: repeat(auto-fit, minmax(210px, 1fr)); }
+.review-reference-picker label { display: flex; align-items: flex-start; gap: 6px; overflow-wrap: anywhere; font-weight: 500; }
+.review-reference-picker input { flex: 0 0 auto; margin-top: 3px; }
+.review-structured-editor button { justify-self: start; }
+.analysis-review-controls .reject-button { color: #883b43; border-color: #e2b9bc; }
+.reviewed-draft-actions { display: grid; gap: 8px; padding: 12px; border: 1px solid #b8dcd5; border-radius: 8px; background: #f1faf7; }
+.reviewed-draft-actions p { margin: 0; color: #24574f; font-size: 0.84rem; line-height: 1.5; }
+.analysis-failure { margin: 0; color: #883b43; font-size: 0.88rem; }
+
+@media (max-width: 760px) {
+  .review-evaluation, .analysis-section { padding: 14px; }
+  .evaluation-totals { grid-template-columns: 1fr; }
+  .fixture-option { align-items: start; flex-direction: column; }
+  .analysis-card-heading { flex-direction: column; }
+}

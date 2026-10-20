@@ -2,7 +2,8 @@ import { existsSync } from 'node:fs';
 import { resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { createApp } from './app.js';
-import { initializeDatabase, openDemoDatabase } from './database.js';
+import { createOpenAIAnalyzer } from './ai.js';
+import { initializeDatabase, openDemoDatabase, recoverInterruptedAnalyses, recoverPendingAnalysisCompletions } from './database.js';
 
 const serverDirectory = fileURLToPath(new URL('.', import.meta.url));
 const buildDirectory = resolve(serverDirectory, '../dist');
@@ -13,12 +14,14 @@ if (!existsSync(resolve(buildDirectory, 'index.html'))) {
   const db = openDemoDatabase();
   try {
     initializeDatabase(db);
+    recoverPendingAnalysisCompletions(db);
+    recoverInterruptedAnalyses(db);
   } catch (error) {
     db.close();
     throw error;
   }
 
-  const app = createApp({ db, buildDirectory });
+  const app = createApp({ db, buildDirectory, analyze: createOpenAIAnalyzer() });
   const server = app.listen(3000, '127.0.0.1');
   server.on('listening', () => console.log('Support Engineering Workbench: http://127.0.0.1:3000'));
   server.on('error', (error) => {
