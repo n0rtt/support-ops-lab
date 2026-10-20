@@ -20,6 +20,7 @@ import {
   getCase,
   initializeDatabase,
   openDatabase,
+  projectRoot,
   resetDemoDatabase,
   runIdempotentMutation,
   StaleCaseError,
@@ -35,17 +36,19 @@ test('initialization migrates and seeds once without replacing existing records'
   initializeDatabase(db);
   initializeDatabase(db);
 
-  assert.equal(db.prepare('PRAGMA user_version').get().user_version, 4);
+  assert.equal(db.prepare('PRAGMA user_version').get().user_version, 5);
   assert.deepEqual(
     db.prepare("SELECT name FROM sqlite_master WHERE type = 'table' AND name NOT LIKE 'sqlite_%' ORDER BY name")
       .all()
       .map((row) => row.name),
-    ['activities', 'case_evidence', 'cases', 'diagnostics', 'knowledge_entries', 'mutation_receipts'],
+    ['activities', 'analyses', 'case_evidence', 'cases', 'diagnostics', 'knowledge_entries', 'mutation_receipts', 'reviews'],
   );
   assert.equal(db.prepare('SELECT COUNT(*) AS count FROM cases').get().count, 3);
   assert.equal(db.prepare('SELECT COUNT(*) AS count FROM activities').get().count, 4);
   assert.equal(db.prepare('SELECT COUNT(*) AS count FROM diagnostics').get().count, 9);
   assert.equal(db.prepare('SELECT COUNT(*) AS count FROM knowledge_entries').get().count, 4);
+  assert.equal(db.prepare('SELECT COUNT(*) AS count FROM analyses').get().count, 0);
+  assert.equal(db.prepare('SELECT COUNT(*) AS count FROM reviews').get().count, 0);
   assert.equal(db.prepare('SELECT COUNT(*) AS count FROM case_evidence WHERE case_id = ?').get('SEW-1001').count, 3);
   assert.equal(db.prepare('SELECT version FROM cases WHERE id = ?').get('SEW-1001').version, 2);
   assert.equal(db.prepare("SELECT activity_type FROM activities WHERE case_id = ? ORDER BY sequence DESC LIMIT 1").get('SEW-1001').activity_type, 'evidence_seeded');
@@ -77,7 +80,7 @@ test('M2 activity-order migration preserves existing cases, activities, and rece
 
   initializeDatabase(db);
 
-  assert.equal(db.prepare('PRAGMA user_version').get().user_version, 4);
+  assert.equal(db.prepare('PRAGMA user_version').get().user_version, 5);
   assert.deepEqual(
     { ...db.prepare('SELECT id, status, version FROM cases WHERE id = ?').get('SEW-OLD') },
     { id: 'SEW-OLD', status: 'open', version: 3 },
@@ -96,7 +99,7 @@ test('M2 activity-order migration preserves existing cases, activities, and rece
     db.prepare("SELECT name FROM sqlite_master WHERE type = 'table' AND name NOT LIKE 'sqlite_%' ORDER BY name")
       .all()
       .map((row) => row.name),
-    ['activities', 'case_evidence', 'cases', 'diagnostics', 'knowledge_entries', 'mutation_receipts'],
+    ['activities', 'analyses', 'case_evidence', 'cases', 'diagnostics', 'knowledge_entries', 'mutation_receipts', 'reviews'],
   );
   assert.equal(db.prepare('SELECT COUNT(*) AS count FROM case_evidence').get().count, 0);
   assert.equal(db.prepare('SELECT COUNT(*) AS count FROM diagnostics').get().count, 9);
@@ -159,7 +162,7 @@ test('schema-v3 upgrade preserves M2 history and receipts while auditing A seed 
   t.after(() => db.close());
 
   initializeDatabase(db);
-  assert.equal(db.prepare('PRAGMA user_version').get().user_version, 4);
+  assert.equal(db.prepare('PRAGMA user_version').get().user_version, 5);
   assert.deepEqual({ ...db.prepare('SELECT status, version FROM cases WHERE id = ?').get('SEW-1001') }, { status: 'escalated', version: 8 });
   assert.deepEqual(
     getCase(db, 'SEW-1001').activities.map((activity) => [activity.type, activity.sequence]),
@@ -409,19 +412,38 @@ test('demo reset atomically restores linked A evidence and initially unlinked B 
   t.after(() => rmSync(projectDirectory, { recursive: true, force: true }));
   const serverDirectory = join(projectDirectory, 'server');
   const fixtureDirectory = join(projectDirectory, 'fixtures');
+  const sharedDirectory = join(projectDirectory, 'shared');
   mkdirSync(serverDirectory);
   mkdirSync(fixtureDirectory);
+  mkdirSync(sharedDirectory);
   writeFileSync(join(projectDirectory, 'package.json'), '{"type":"module"}\n');
+  symlinkSync(join(projectRoot, 'node_modules'), join(projectDirectory, 'node_modules'), 'dir');
   for (const name of ['database.js']) copyFileSync(new URL('../server/' + name, import.meta.url), join(serverDirectory, name));
-  for (const name of ['cases.js', 'diagnostics.js', 'knowledge.js']) {
+  for (const name of ['cases.js', 'diagnostics.js', 'knowledge.js', 'analyses.js']) {
     copyFileSync(new URL('../fixtures/' + name, import.meta.url), join(fixtureDirectory, name));
   }
+  copyFileSync(new URL('../shared/recommendation.js', import.meta.url), join(sharedDirectory, 'recommendation.js'));
   const isolatedDatabase = await import(pathToFileURL(join(serverDirectory, 'database.js')).href);
   let db = isolatedDatabase.openDemoDatabase();
   isolatedDatabase.initializeDatabase(db);
   db.prepare("INSERT INTO case_evidence (case_id, diagnostic_id, linked_at, source) VALUES ('SEW-1002', 'DIAG-WH-SUB-001', '2026-10-20T12:00:00.000Z', 'operator')").run();
   db.prepare('UPDATE cases SET version = version + 1 WHERE id = ?').run('SEW-1002');
   db.prepare("INSERT INTO mutation_receipts VALUES ('operator-work', 'fingerprint', '{\"ok\":true}', '2026-10-20T12:00:00.000Z')").run();
+  const analysisCase = isolatedDatabase.getCase(db, 'SEW-1001');
+  const fixtureId = 'fixture-a-intentional-outage-error';
+  const analysis = isolatedDatabase.runIdempotentMutation(db, {
+    requestKey: 'operator-analysis', method: 'POST', route: '/api/cases/SEW-1001/analyses', caseId: 'SEW-1001',
+    payload: { source: 'fixture', fixtureId, expectedVersion: analysisCase.version }, expectedVersion: analysisCase.version,
+  }, (connection) => isolatedDatabase.reserveAnalysis(connection, { caseId: 'SEW-1001', source: 'fixture', fixtureId }));
+  const afterAnalysis = isolatedDatabase.getCase(db, 'SEW-1001');
+  isolatedDatabase.runIdempotentMutation(db, {
+    requestKey: 'operator-review', method: 'POST', route: '/api/cases/SEW-1001/analyses/' + analysis.response.analysisId + '/reviews', caseId: 'SEW-1001',
+    payload: { decision: 'reject', feedback: 'Corrected fixture review.', expectedVersion: afterAnalysis.version }, expectedVersion: afterAnalysis.version,
+  }, (connection) => isolatedDatabase.appendAnalysisReview(connection, {
+    caseId: 'SEW-1001', analysisId: analysis.response.analysisId, decision: 'reject', feedback: 'Corrected fixture review.',
+  }));
+  assert.equal(db.prepare('SELECT COUNT(*) AS count FROM analyses').get().count, 1);
+  assert.equal(db.prepare('SELECT COUNT(*) AS count FROM reviews').get().count, 1);
   db.close();
 
   isolatedDatabase.resetDemoDatabase({ confirmed: true });
@@ -434,6 +456,8 @@ test('demo reset atomically restores linked A evidence and initially unlinked B 
     assert.equal(db.prepare('SELECT COUNT(*) AS count FROM case_evidence WHERE case_id = ?').get('SEW-1002').count, 0);
     assert.equal(db.prepare('SELECT version FROM cases WHERE id = ?').get('SEW-1002').version, 1);
     assert.equal(db.prepare('SELECT COUNT(*) AS count FROM mutation_receipts').get().count, 0);
+    assert.equal(db.prepare('SELECT COUNT(*) AS count FROM analyses').get().count, 0);
+    assert.equal(db.prepare('SELECT COUNT(*) AS count FROM reviews').get().count, 0);
     assert.equal(db.prepare('SELECT COUNT(*) AS count FROM activities').get().count, 4);
     assert.deepEqual(db.prepare('PRAGMA foreign_key_check').all(), []);
   } finally {
@@ -448,15 +472,19 @@ test('demo database opening rejects a dangling symlink before SQLite can create 
   t.after(() => rmSync(outsideDirectory, { recursive: true, force: true }));
   const serverDirectory = join(projectDirectory, 'server');
   const fixtureDirectory = join(projectDirectory, 'fixtures');
+  const sharedDirectory = join(projectDirectory, 'shared');
   const dataDirectory = join(projectDirectory, 'data');
   mkdirSync(serverDirectory);
   mkdirSync(fixtureDirectory);
+  mkdirSync(sharedDirectory);
   mkdirSync(dataDirectory);
   writeFileSync(join(projectDirectory, 'package.json'), '{"type":"module"}\n');
+  symlinkSync(join(projectRoot, 'node_modules'), join(projectDirectory, 'node_modules'), 'dir');
   copyFileSync(new URL('../server/database.js', import.meta.url), join(serverDirectory, 'database.js'));
-  for (const name of ['cases.js', 'diagnostics.js', 'knowledge.js']) {
+  for (const name of ['cases.js', 'diagnostics.js', 'knowledge.js', 'analyses.js']) {
     copyFileSync(new URL('../fixtures/' + name, import.meta.url), join(fixtureDirectory, name));
   }
+  copyFileSync(new URL('../shared/recommendation.js', import.meta.url), join(sharedDirectory, 'recommendation.js'));
 
   const targetPath = join(outsideDirectory, 'supportops.sqlite');
   const databasePath = join(dataDirectory, 'supportops.sqlite');

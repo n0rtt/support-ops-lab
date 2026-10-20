@@ -4,7 +4,14 @@ import { dirname, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import {
   appendCaseActivity,
+  appendAnalysisReview,
   associateCaseEvidence,
+  AnalysisContextTooLargeError,
+  AnalysisInProgressError,
+  AnalysisNotFoundError,
+  AnalysisNotReadyError,
+  getAnalysis,
+  finishAnalysis,
   CaseNotFoundError,
   changeCaseStatus,
   getDiagnostic,
@@ -16,12 +23,19 @@ import {
   InvalidEscalationEvidenceError,
   InvalidStatusContextError,
   listCases,
+  listReviewQuality,
   listKnowledgeEntries,
   searchDiagnostics,
   runIdempotentMutation,
+  reserveAnalysis,
   StaleCaseError,
+  UnsupportedAnalysisReferencesError,
+  InvalidAnalysisFixtureError,
+  InvalidReviewError,
 } from './database.js';
 import { z } from 'zod';
+import { recommendationSchema } from '../shared/recommendation.js';
+import { analysisPromptVersion } from './ai.js';
 
 const serverDirectory = dirname(fileURLToPath(import.meta.url));
 const defaultBuildDirectory = resolve(serverDirectory, '../dist');
@@ -61,6 +75,15 @@ const statusBodySchema = z.discriminatedUnion('status', [
     expectedVersion: expectedVersionSchema,
     outcome: boundedTextSchema.optional(),
   }),
+]);
+const analysisBodySchema = z.discriminatedUnion('source', [
+  z.strictObject({ source: z.literal('live'), expectedVersion: expectedVersionSchema }),
+  z.strictObject({ source: z.literal('fixture'), fixtureId: caseIdSchema, expectedVersion: expectedVersionSchema }),
+]);
+const reviewBodySchema = z.discriminatedUnion('decision', [
+  z.strictObject({ decision: z.literal('accept'), expectedVersion: expectedVersionSchema }),
+  z.strictObject({ decision: z.literal('edit'), expectedVersion: expectedVersionSchema, recommendation: recommendationSchema }),
+  z.strictObject({ decision: z.literal('reject'), expectedVersion: expectedVersionSchema, feedback: nonblankTextSchema }),
 ]);
 
 class RequestValidationError extends Error {
@@ -116,17 +139,31 @@ function validateStatusBody(body) {
   });
 }
 
+function validateAnalysisBody(body) {
+  return parseRequest(analysisBodySchema, body, { source: 'invalid_analysis_source', fixtureId: 'invalid_analysis_fixture', expectedVersion: 'invalid_expected_version' });
+}
+
+function validateReviewBody(body) {
+  return parseRequest(reviewBodySchema, body, { decision: 'invalid_review', expectedVersion: 'invalid_expected_version', recommendation: 'invalid_recommendation', feedback: 'invalid_review_feedback' });
+}
+
 function sendMutationError(res, error) {
   if (error instanceof RequestValidationError) {
     return res.status(error.status).json({ error: error.code });
   }
   if (error instanceof CaseNotFoundError) return res.status(404).json({ error: error.code });
+  if (error instanceof AnalysisNotFoundError) return res.status(404).json({ error: error.code });
   if (error instanceof InvalidEvidenceAssociationError) {
     return res.status(400).json({ error: error.code, details: error.details });
   }
   if (error instanceof IdempotencyKeyReusedError || error instanceof StaleCaseError || error instanceof InvalidCaseTransitionError) {
     return res.status(409).json({ error: error.code });
   }
+  if (error instanceof AnalysisInProgressError || error instanceof AnalysisNotReadyError || error instanceof InvalidAnalysisFixtureError || error instanceof UnsupportedAnalysisReferencesError) {
+    return res.status(409).json({ error: error.code, ...(error.details ? { details: error.details } : {}) });
+  }
+  if (error instanceof AnalysisContextTooLargeError) return res.status(413).json({ error: error.code });
+  if (error instanceof InvalidReviewError) return res.status(400).json({ error: error.code });
   if (error instanceof InvalidEscalationEvidenceError || error instanceof InvalidStatusContextError) {
     return res.status(400).json(error instanceof InvalidEscalationEvidenceError
       ? { error: error.code, details: error.details }
@@ -149,7 +186,7 @@ function sameOrigin(req) {
   }
 }
 
-export function createApp({ db, buildDirectory = defaultBuildDirectory }) {
+export function createApp({ db, buildDirectory = defaultBuildDirectory, analyze = null }) {
   if (!db) throw new TypeError('A database connection is required.');
   const app = express();
   app.disable('x-powered-by');
@@ -168,7 +205,7 @@ export function createApp({ db, buildDirectory = defaultBuildDirectory }) {
   app.use(express.json({ limit: '64kb', strict: true }));
 
   app.get('/api/config', (_req, res) => {
-    res.json({ name: 'Support Engineering Workbench', dataMode: 'synthetic' });
+    res.json({ name: 'Support Engineering Workbench', dataMode: 'synthetic', liveInferenceAvailable: Boolean(analyze) });
   });
 
   app.get('/api/cases', (req, res) => {
@@ -191,6 +228,89 @@ export function createApp({ db, buildDirectory = defaultBuildDirectory }) {
       res.json({ case: item });
     } catch {
       res.status(500).json({ error: 'case_detail_unavailable' });
+    }
+  });
+
+  app.get('/api/analyses/:analysisId', (req, res) => {
+    if (!caseIdPattern.test(req.params.analysisId)) return res.status(400).json({ error: 'invalid_analysis_id' });
+    try {
+      const analysis = getAnalysis(db, req.params.analysisId);
+      if (!analysis) return res.status(404).json({ error: 'analysis_not_found' });
+      res.json({ analysis });
+    } catch {
+      res.status(500).json({ error: 'analysis_unavailable' });
+    }
+  });
+
+  app.get('/api/reviews', (_req, res) => {
+    try {
+      res.json(listReviewQuality(db));
+    } catch {
+      res.status(500).json({ error: 'review_history_unavailable' });
+    }
+  });
+
+  app.post('/api/cases/:caseId/analyses', (req, res) => {
+    try {
+      validateCaseId(req.params.caseId);
+      const requestKey = req.get('idempotency-key');
+      validateRequestKey(requestKey);
+      const payload = validateAnalysisBody(req.body);
+      if (payload.source === 'live' && !analyze) return res.status(503).json({ error: 'live_inference_unavailable' });
+      const result = runIdempotentMutation(
+        db,
+        { requestKey, method: req.method, route: req.path, caseId: req.params.caseId, payload, expectedVersion: payload.expectedVersion },
+        (connection) => reserveAnalysis(connection, {
+          caseId: req.params.caseId,
+          source: payload.source,
+          fixtureId: payload.fixtureId,
+          promptVersion: analysisPromptVersion,
+        }),
+      );
+      if (payload.source === 'live' && !result.replayed) {
+        const analysisId = result.response.analysisId;
+        setImmediate(async () => {
+          try {
+            const snapshot = getAnalysis(db, analysisId);
+            if (!snapshot || snapshot.status !== 'running') return;
+            const inference = await analyze(snapshot.context);
+            finishAnalysis(db, { analysisId, result: inference });
+          } catch {
+            try {
+              finishAnalysis(db, { analysisId, result: { status: 'failed', failureCode: 'provider_unavailable', provider: 'openai' } });
+            } catch {
+              // A persistent database failure leaves the durable reservation for startup recovery.
+            }
+          }
+        });
+      }
+      res.status(payload.source === 'fixture' ? 201 : 202).json({ ...result.response, replayed: result.replayed });
+    } catch (error) {
+      sendMutationError(res, error);
+    }
+  });
+
+  app.post('/api/cases/:caseId/analyses/:analysisId/reviews', (req, res) => {
+    try {
+      validateCaseId(req.params.caseId);
+      if (!caseIdPattern.test(req.params.analysisId)) throw new RequestValidationError('invalid_analysis_id');
+      const requestKey = req.get('idempotency-key');
+      validateRequestKey(requestKey);
+      const payload = validateReviewBody(req.body);
+      const result = runIdempotentMutation(
+        db,
+        { requestKey, method: req.method, route: req.path, caseId: req.params.caseId, payload, expectedVersion: payload.expectedVersion },
+        (connection) => appendAnalysisReview(connection, {
+          caseId: req.params.caseId,
+          analysisId: req.params.analysisId,
+          decision: payload.decision,
+          recommendation: payload.recommendation,
+          feedback: payload.feedback,
+        }),
+      );
+      res.json({ ...result.response, replayed: result.replayed });
+    } catch (error) {
+      sendMutationError(res, error);
     }
   });
 

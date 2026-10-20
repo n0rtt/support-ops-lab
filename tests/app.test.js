@@ -5,8 +5,8 @@ import { createApp } from '../server/app.js';
 import { initializeDatabase, openDatabase } from '../server/database.js';
 import { temporaryDatabase } from './helpers.js';
 
-async function listen(db) {
-  const server = createServer(createApp({ db, buildDirectory: '/missing-supportops-build' }));
+async function listen(db, options = {}) {
+  const server = createServer(createApp({ db, buildDirectory: '/missing-supportops-build', ...options }));
   await new Promise((resolve, reject) => {
     server.once('error', reject);
     server.listen(0, '127.0.0.1', resolve);
@@ -20,11 +20,11 @@ async function listen(db) {
   };
 }
 
-async function testServer(t) {
+async function testServer(t, options = {}) {
   const { databasePath } = temporaryDatabase(t);
   const db = openDatabase(databasePath);
   initializeDatabase(db);
-  const server = await listen(db);
+  const server = await listen(db, options);
   t.after(async () => {
     await server.close();
     db.close();
@@ -60,6 +60,29 @@ async function detail(baseUrl, caseId) {
   return (await fetch(baseUrl + '/api/cases/' + caseId)).json();
 }
 
+function postAnalysis(baseUrl, caseId, key, payload) {
+  return fetch(baseUrl + '/api/cases/' + caseId + '/analyses', {
+    method: 'POST', headers: mutationHeaders(baseUrl, key), body: JSON.stringify(payload),
+  });
+}
+
+function postReview(baseUrl, caseId, analysisId, key, payload) {
+  return fetch(baseUrl + '/api/cases/' + caseId + '/analyses/' + analysisId + '/reviews', {
+    method: 'POST', headers: mutationHeaders(baseUrl, key), body: JSON.stringify(payload),
+  });
+}
+
+async function waitForAnalysis(baseUrl, analysisId) {
+  for (let attempt = 0; attempt < 100; attempt += 1) {
+    const response = await fetch(baseUrl + '/api/analyses/' + analysisId);
+    if (!response.ok) throw new Error('analysis request failed');
+    const { analysis } = await response.json();
+    if (analysis.status !== 'running') return analysis;
+    await new Promise((resolve) => setTimeout(resolve, 5));
+  }
+  throw new Error('analysis did not reach a terminal state');
+}
+
 test('M1 seed and config remain intact with M2 queue filtering and chronological case detail', async (t) => {
   const { baseUrl, db } = await testServer(t);
 
@@ -68,6 +91,7 @@ test('M1 seed and config remain intact with M2 queue filtering and chronological
   assert.deepEqual(await config.json(), {
     name: 'Support Engineering Workbench',
     dataMode: 'synthetic',
+    liveInferenceAvailable: false,
   });
 
   const all = await fetch(baseUrl + '/api/cases');
@@ -606,4 +630,244 @@ test('escalation snapshots only linked evidence and old empty-list request recei
   assert.equal(response.status, 200);
   saved = (await detail(baseUrl, 'SEW-1002')).case;
   assert.deepEqual(saved.activities.filter((activity) => activity.payload.to === 'escalated').map((activity) => activity.payload.evidenceIds), [[], ['DIAG-WH-SUB-001']]);
+});
+
+test('all three offline evaluations keep explicit provenance, prerequisites, context snapshots, and append-only review history', async (t) => {
+  const { baseUrl, db } = await testServer(t);
+  const config = await (await fetch(baseUrl + '/api/config')).json();
+  assert.equal(config.liveInferenceAvailable, false);
+
+  let a = (await detail(baseUrl, 'SEW-1001')).case;
+  let response = await postAnalysis(baseUrl, 'SEW-1001', 'no-key-live-request', { source: 'live', expectedVersion: a.version });
+  assert.equal(response.status, 503);
+  assert.deepEqual(await response.json(), { error: 'live_inference_unavailable' });
+  assert.equal(db.prepare('SELECT COUNT(*) AS count FROM analyses').get().count, 0);
+  assert.equal(db.prepare("SELECT COUNT(*) AS count FROM mutation_receipts WHERE request_key = 'no-key-live-request'").get().count, 0);
+  const fixtureA = a.analysisFixtures[0];
+  assert.equal(fixtureA.available, true);
+  assert.match(fixtureA.label, /intentionally incorrect/);
+  response = await postAnalysis(baseUrl, 'SEW-1001', 'fixture-a', {
+    source: 'fixture', fixtureId: fixtureA.id, expectedVersion: a.version,
+  });
+  assert.equal(response.status, 201);
+  const firstAck = await response.json();
+  response = await postAnalysis(baseUrl, 'SEW-1001', 'fixture-a', {
+    source: 'fixture', fixtureId: fixtureA.id, expectedVersion: a.version,
+  });
+  assert.equal((await response.json()).replayed, true);
+  let { analysis: incorrect } = await (await fetch(baseUrl + '/api/analyses/' + firstAck.analysisId)).json();
+  assert.equal(incorrect.source, 'fixture');
+  assert.equal(incorrect.fixtureId, fixtureA.id);
+  assert.match(incorrect.fixtureLabel, /intentionally incorrect/);
+  assert.equal(incorrect.provider, null);
+  assert.equal(incorrect.requestedModel, null);
+  assert.equal(incorrect.returnedModel, null);
+  assert.equal(incorrect.responseId, null);
+  assert.equal(incorrect.referenceValidation.valid, true);
+  assert.match(incorrect.recommendation.possibleCause.text, /outage/i);
+  assert.equal(incorrect.referenceAllowlist.diagnostics.length, 3);
+  assert.equal(incorrect.referenceAllowlist.knowledge.length, 4);
+  assert.equal(incorrect.context.diagnostics.some((row) => row.id === 'DIAG-WH-INV-001'), false);
+  assert.equal(incorrect.context.case.id, 'SEW-1001');
+
+  a = (await detail(baseUrl, 'SEW-1001')).case;
+  response = await postReview(baseUrl, 'SEW-1001', incorrect.id, 'reject-a', {
+    decision: 'reject', expectedVersion: a.version,
+    feedback: 'The supplied 401 responses indicate rejected authentication. They do not establish a provider-wide outage; verify the configured key and scopes.',
+  });
+  assert.equal(response.status, 200);
+  a = (await detail(baseUrl, 'SEW-1001')).case;
+  response = await postAnalysis(baseUrl, 'SEW-1001', 'fixture-a-reanalysis', {
+    source: 'fixture', fixtureId: fixtureA.id, expectedVersion: a.version,
+  });
+  assert.equal(response.status, 201);
+  const reanalysis = await response.json();
+  const secondA = (await (await fetch(baseUrl + '/api/analyses/' + reanalysis.analysisId)).json()).analysis;
+  assert.equal(secondA.context.correctiveFeedback.length, 1);
+  assert.match(secondA.context.correctiveFeedback[0].feedback, /401 responses indicate rejected authentication/);
+  incorrect = (await (await fetch(baseUrl + '/api/analyses/' + incorrect.id)).json()).analysis;
+  assert.equal(incorrect.reviews.length, 1);
+  assert.equal(incorrect.reviews[0].decision, 'rejected');
+
+  let b = (await detail(baseUrl, 'SEW-1002')).case;
+  const fixtureB = b.analysisFixtures[0];
+  assert.equal(fixtureB.available, false);
+  assert.match(fixtureB.prerequisite, /Associate all required diagnostic records/);
+  response = await postAnalysis(baseUrl, 'SEW-1002', 'fixture-b-before-evidence', {
+    source: 'fixture', fixtureId: fixtureB.id, expectedVersion: b.version,
+  });
+  assert.equal(response.status, 409);
+  response = await fetch(baseUrl + '/api/cases/SEW-1002/evidence', {
+    method: 'POST', headers: mutationHeaders(baseUrl, 'link-b-attempts'),
+    body: JSON.stringify({ diagnosticIds: ['DIAG-WH-SUB-001', 'DIAG-WH-SUB-002', 'DIAG-WH-SUB-003'], expectedVersion: b.version }),
+  });
+  assert.equal(response.status, 200);
+  b = (await detail(baseUrl, 'SEW-1002')).case;
+  assert.equal(b.analysisFixtures[0].available, true);
+  response = await postAnalysis(baseUrl, 'SEW-1002', 'fixture-b', {
+    source: 'fixture', fixtureId: fixtureB.id, expectedVersion: b.version,
+  });
+  assert.equal(response.status, 201);
+  const bAck = await response.json();
+  const originalB = (await (await fetch(baseUrl + '/api/analyses/' + bAck.analysisId)).json()).analysis;
+  assert.equal(originalB.referenceValidation.valid, true);
+  assert.equal(originalB.context.diagnostics.length, 3);
+
+  const edited = {
+    ...originalB.recommendation,
+    draftResponse: 'We observed two unsuccessful attempts and a later HTTP 204 acknowledgment. We cannot confirm downstream processing; please check your receiver logs.',
+  };
+  b = (await detail(baseUrl, 'SEW-1002')).case;
+  response = await postReview(baseUrl, 'SEW-1002', originalB.id, 'edit-b', {
+    decision: 'edit', expectedVersion: b.version, recommendation: edited,
+  });
+  assert.equal(response.status, 200);
+  b = (await detail(baseUrl, 'SEW-1002')).case;
+  response = await postReview(baseUrl, 'SEW-1002', originalB.id, 'accept-edited-b', {
+    decision: 'accept', expectedVersion: b.version,
+  });
+  assert.equal(response.status, 200);
+  const afterReviews = (await detail(baseUrl, 'SEW-1002')).case;
+  assert.equal(afterReviews.status, 'in_progress');
+  assert.equal(afterReviews.activities.some((activity) => activity.type === 'simulated_reply'), false);
+  assert.equal(afterReviews.activities.some((activity) => activity.type === 'status_changed'), false);
+  const preservedB = (await (await fetch(baseUrl + '/api/analyses/' + originalB.id)).json()).analysis;
+  assert.equal(preservedB.recommendation.draftResponse, originalB.recommendation.draftResponse);
+  assert.deepEqual(preservedB.reviews.map((review) => review.decision), ['edited', 'accepted']);
+  assert.equal(preservedB.reviews[0].recommendation.draftResponse, edited.draftResponse);
+
+  let c = (await detail(baseUrl, 'SEW-1003')).case;
+  assert.equal(c.analysisFixtures[0].available, true);
+  response = await postAnalysis(baseUrl, 'SEW-1003', 'fixture-c', {
+    source: 'fixture', fixtureId: c.analysisFixtures[0].id, expectedVersion: c.version,
+  });
+  assert.equal(response.status, 201);
+  const cAnalysis = (await (await fetch(baseUrl + '/api/analyses/' + (await response.json()).analysisId)).json()).analysis;
+  assert.equal(cAnalysis.recommendation.classification, 'insufficient_evidence');
+  assert.equal(cAnalysis.recommendation.possibleCause, null);
+  assert.equal(cAnalysis.recommendation.observations.length, 0);
+  assert.ok(cAnalysis.recommendation.uncertainty.length);
+
+  const quality = await (await fetch(baseUrl + '/api/reviews')).json();
+  assert.deepEqual(quality.totals.fixture, { reviewed: 2, accepted: 1, edited: 0, rejected: 1 });
+  assert.deepEqual(quality.totals.live, { reviewed: 0, accepted: 0, edited: 0, rejected: 0 });
+  assert.equal(quality.history.length, 3);
+  assert.deepEqual(quality.history.filter((review) => review.analysisId === originalB.id).map((review) => review.decision), ['accepted', 'edited']);
+});
+
+test('live analysis reservation is durable and idempotent, rejects unsupported references, and allows corrective review only', async (t) => {
+  let releaseInference;
+  let signalStarted;
+  const started = new Promise((resolve) => { signalStarted = resolve; });
+  let calls = 0;
+  const { baseUrl } = await testServer(t, {
+    analyze: async () => {
+      calls += 1;
+      signalStarted();
+      return new Promise((resolve) => { releaseInference = resolve; });
+    },
+  });
+  const caseA = (await detail(baseUrl, 'SEW-1001')).case;
+  const payload = { source: 'live', expectedVersion: caseA.version };
+  let response = await postAnalysis(baseUrl, caseA.id, 'live-analysis-one', payload);
+  assert.equal(response.status, 202);
+  const ack = await response.json();
+  await started;
+  response = await postAnalysis(baseUrl, caseA.id, 'live-analysis-one', payload);
+  assert.equal(response.status, 202);
+  assert.equal((await response.json()).replayed, true);
+  assert.equal(calls, 1);
+  response = await postAnalysis(baseUrl, caseA.id, 'live-analysis-two', { source: 'live', expectedVersion: ack.version });
+  assert.equal(response.status, 409);
+  assert.deepEqual(await response.json(), { error: 'analysis_in_progress' });
+
+  const recommendation = {
+    classification: 'authentication',
+    observations: [{ text: 'A 401 response was observed.', references: [{ kind: 'diagnostic', id: 'DIAG-WH-INV-001' }] }],
+    possibleCause: { text: 'This is an authentication failure.', references: [{ kind: 'diagnostic', id: 'DIAG-WH-INV-001' }] },
+    nextSteps: ['Ask the customer to verify the configured key.'],
+    draftResponse: 'Please verify the API key.',
+    references: [{ kind: 'diagnostic', id: 'DIAG-WH-INV-001' }],
+    uncertainty: [],
+  };
+  releaseInference({
+    status: 'completed', recommendation, provider: 'openai', requestedModel: 'gpt-6.1-sol',
+    returnedModel: 'gpt-6.1-sol', responseId: 'resp_test_transport_only',
+  });
+  const analysis = await waitForAnalysis(baseUrl, ack.analysisId);
+  assert.equal(analysis.source, 'live');
+  assert.equal(analysis.provider, 'openai');
+  assert.equal(analysis.returnedModel, 'gpt-6.1-sol');
+  assert.equal(analysis.responseId, 'resp_test_transport_only');
+  assert.equal(analysis.referenceValidation.valid, false);
+  assert.ok(analysis.referenceValidation.unsupportedReferences.some((item) => item.id === 'DIAG-WH-INV-001'));
+  assert.equal(analysis.context.diagnostics.some((item) => item.id === 'DIAG-WH-INV-001'), false);
+
+  const updated = (await detail(baseUrl, 'SEW-1001')).case;
+  assert.equal(updated.status, 'open');
+  assert.equal(updated.activities.some((activity) => activity.type === 'simulated_reply'), false);
+  assert.equal(updated.activities.some((activity) => activity.type === 'status_changed'), false);
+  response = await postReview(baseUrl, caseA.id, analysis.id, 'bad-reference-accept', { decision: 'accept', expectedVersion: updated.version });
+  assert.equal(response.status, 409);
+  assert.deepEqual((await response.json()).error, 'unsupported_references');
+  response = await postReview(baseUrl, caseA.id, analysis.id, 'bad-reference-reject', {
+    decision: 'reject', expectedVersion: updated.version,
+    feedback: 'This diagnostic exists but was not supplied to the analysis. It cannot support the recommendation.',
+  });
+  assert.equal(response.status, 200);
+  assert.equal((await detail(baseUrl, 'SEW-1001')).case.status, 'open');
+});
+
+test('live refusal, incomplete, timeout, and malformed-output results become durable terminal states', async (t) => {
+  const results = new Map([
+    ['SEW-1001', { status: 'refused', failureCode: 'provider_refusal', provider: 'openai', requestedModel: 'gpt-6.1-sol', returnedModel: 'gpt-6.1-sol', responseId: 'resp_refusal_test' }],
+    ['SEW-1002', { status: 'incomplete', failureCode: 'provider_incomplete', provider: 'openai', requestedModel: 'gpt-6.1-sol', returnedModel: 'gpt-6.1-sol', responseId: 'resp_incomplete_test' }],
+    ['SEW-1003', { status: 'failed', failureCode: 'provider_timeout', provider: 'openai', requestedModel: 'gpt-6.1-sol' }],
+  ]);
+  const { baseUrl } = await testServer(t, { analyze: async (context) => results.get(context.case.id) });
+  const ids = [];
+  for (const caseId of ['SEW-1001', 'SEW-1002', 'SEW-1003']) {
+    const item = (await detail(baseUrl, caseId)).case;
+    const response = await postAnalysis(baseUrl, caseId, 'failure-' + caseId, { source: 'live', expectedVersion: item.version });
+    assert.equal(response.status, 202);
+    ids.push((await response.json()).analysisId);
+  }
+  const failures = await Promise.all(ids.map((id) => waitForAnalysis(baseUrl, id)));
+  assert.deepEqual(failures.map((item) => [item.status, item.failureCode]), [
+    ['refused', 'provider_refusal'],
+    ['incomplete', 'provider_incomplete'],
+    ['failed', 'provider_timeout'],
+  ]);
+  assert.equal(failures.every((item) => item.recommendation === null), true);
+
+  const currentA = (await detail(baseUrl, 'SEW-1001')).case;
+  results.set('SEW-1001', {
+    status: 'completed', recommendation: { classification: 'unknown' },
+    provider: 'openai', requestedModel: 'gpt-6.1-sol', returnedModel: 'gpt-6.1-sol', responseId: 'resp_malformed_test',
+  });
+  const malformed = await postAnalysis(baseUrl, 'SEW-1001', 'failure-malformed', {
+    source: 'live', expectedVersion: currentA.version,
+  });
+  const malformedAck = await malformed.json();
+  const malformedAnalysis = await waitForAnalysis(baseUrl, malformedAck.analysisId);
+  assert.equal(malformedAnalysis.status, 'failed');
+  assert.equal(malformedAnalysis.failureCode, 'invalid_output');
+  assert.equal(malformedAnalysis.recommendation, null);
+});
+
+test('analysis context over 100 KiB is rejected without a durable reservation', async (t) => {
+  const { baseUrl, db } = await testServer(t, { analyze: async () => ({ status: 'failed', failureCode: 'not_expected' }) });
+  const insert = db.prepare('INSERT INTO activities (id, case_id, created_at, activity_type, payload, sequence) VALUES (?, ?, ?, ?, ?, ?)');
+  for (let i = 0; i < 11; i += 1) {
+    insert.run('ACT-LARGE-' + i, 'SEW-1001', `2026-10-20T12:00:${String(i).padStart(2, '0')}.000Z`, 'internal_note', JSON.stringify({ text: 'x'.repeat(10000) }), 3 + i);
+  }
+  const current = (await detail(baseUrl, 'SEW-1001')).case;
+  const response = await postAnalysis(baseUrl, 'SEW-1001', 'oversized-context', {
+    source: 'live', expectedVersion: current.version,
+  });
+  assert.equal(response.status, 413);
+  assert.deepEqual(await response.json(), { error: 'analysis_context_too_large' });
+  assert.equal(db.prepare('SELECT COUNT(*) AS count FROM analyses').get().count, 0);
+  assert.equal(db.prepare("SELECT COUNT(*) AS count FROM mutation_receipts WHERE request_key = 'oversized-context'").get().count, 0);
+  assert.equal((await detail(baseUrl, 'SEW-1001')).case.version, current.version);
 });

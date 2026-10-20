@@ -40,7 +40,7 @@ The principal journey is queue → case → diagnostic search/association → an
 | Persistence | SQLite through built-in `node:sqlite` | Durable transactions without a database service, ORM, or native npm database addon. |
 | Validation | Zod | Runtime request validation and one structured analysis contract. |
 | AI | OpenAI Responses API through the official JavaScript SDK | One bounded integration with deterministic injected provider doubles for tests. |
-| Model | Proposed default `gpt-5.6-terra`; server-side `OPENAI_MODEL` override | Record the actual returned model for each live analysis. Account access and quality remain unvalidated until exercised. |
+| Model | Product Owner-amended default `gpt-6.1-sol`; server-side `OPENAI_MODEL` override | Record the actual returned model for each live analysis. Account access and quality remain unvalidated until exercised. |
 | Tests | `node:test`, temporary on-disk SQLite databases, Playwright/Chromium | Real transaction/restart coverage plus principal browser journeys without paid CI calls. |
 | Delivery | Local execution; genuine GitHub Actions checks | No mandatory cloud infrastructure. |
 
