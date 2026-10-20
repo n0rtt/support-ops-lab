@@ -87,6 +87,7 @@ function App() {
       { ...action, state: action.state === 'conflict' ? 'conflict' : 'uncertain' },
     ]));
   });
+  const pendingRequestsRef = useRef(pendingRequests);
   const [loadState, setLoadState] = useState('loading');
   const [detailError, setDetailError] = useState('');
   const [queueError, setQueueError] = useState('');
@@ -207,14 +208,16 @@ function App() {
   }
 
   function storePending(slot, action) {
-    const next = { ...pendingRequests, [slot]: action };
+    const next = { ...pendingRequestsRef.current, [slot]: action };
+    pendingRequestsRef.current = next;
     saveStorage(sessionStorage, pendingStorageKey, next);
     setPendingRequests(next);
   }
 
   function clearPending(slot) {
-    const next = { ...pendingRequests };
+    const next = { ...pendingRequestsRef.current };
     delete next[slot];
+    pendingRequestsRef.current = next;
     saveStorage(sessionStorage, pendingStorageKey, next);
     setPendingRequests(next);
   }

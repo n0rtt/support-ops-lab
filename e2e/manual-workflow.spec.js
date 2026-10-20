@@ -338,6 +338,104 @@ test('a conflict that reveals a resolved case keeps an escalation draft availabl
   }
 });
 
+test('conflict reconciliation preserves another case uncertain request and retry key across reload', async ({ browser }) => {
+  const directory = mkdtempSync(join(tmpdir(), 'supportops-pending-'));
+  const db = openDatabase(join(directory, 'supportops.sqlite'));
+  initializeDatabase(db);
+  const server = createApp({ db }).listen(0, '127.0.0.1');
+  let context;
+  try {
+    await new Promise((resolve, reject) => {
+      server.once('listening', resolve);
+      server.once('error', reject);
+    });
+    const baseUrl = 'http://127.0.0.1:' + server.address().port;
+    context = await browser.newContext();
+    const page = await context.newPage();
+    await page.goto(baseUrl + '/#SEW-1001');
+    await expect(page.getByRole('heading', { name: 'Nightly API sync returns 401 responses' })).toBeVisible();
+
+    const externalUpdate = await page.evaluate(async () => {
+      const { case: current } = await (await fetch('/api/cases/SEW-1001')).json();
+      const response = await fetch('/api/cases/SEW-1001/activities', {
+        method: 'POST',
+        headers: { 'content-type': 'application/json', 'idempotency-key': 'other-operator-update' },
+        body: JSON.stringify({ type: 'internal_note', text: 'Another operator updated case A.', expectedVersion: current.version }),
+      });
+      return { status: response.status, body: await response.json() };
+    });
+    expect(externalUpdate.status).toBe(200);
+
+    await page.getByLabel('Visible to support operators only').fill('Draft retained after case A conflict.');
+    await page.getByRole('button', { name: 'Add internal note' }).click();
+    await expect(page.getByRole('button', { name: 'Reload case and review draft' })).toBeVisible();
+
+    const reconciliation = await holdCommittedResponse(
+      page,
+      (url) => url.pathname === '/api/cases/SEW-1001',
+    );
+    await page.getByRole('button', { name: 'Reload case and review draft' }).click();
+    await reconciliation.requestCommitted;
+
+    await page.getByRole('button', { name: /SEW-1002/ }).click();
+    await expect(page.getByRole('heading', { name: 'Subscription updates are not appearing' })).toBeVisible();
+    let uncertainRequestCommitted;
+    const requestCommitted = new Promise((resolve) => { uncertainRequestCommitted = resolve; });
+    await page.route('**/api/cases/SEW-1002/activities', async (route) => {
+      const response = await route.fetch();
+      expect(response.status()).toBe(200);
+      uncertainRequestCommitted();
+      await route.abort();
+    });
+    const noteText = 'Case B committed while case A reconciliation was pending.';
+    await page.getByLabel('Visible to support operators only').fill(noteText);
+    await page.getByRole('button', { name: 'Add internal note' }).click();
+    await requestCommitted;
+    await expect(page.getByRole('alert').getByText(/connection ended before the save was confirmed/)).toBeVisible();
+    const slot = 'SEW-1002:activity:note';
+    const originalPending = await page.evaluate((pendingSlot) =>
+      JSON.parse(sessionStorage.getItem('supportops.pending-actions.v1') || '{}')[pendingSlot], slot);
+    expect(originalPending).toMatchObject({
+      caseId: 'SEW-1002',
+      method: 'POST',
+      state: 'uncertain',
+      payload: { type: 'internal_note', text: noteText },
+    });
+
+    reconciliation.release();
+    await reconciliation.responseFulfilled;
+    await expect(page.getByRole('button', { name: 'Retry exact save' })).toBeVisible();
+    await expect.poll(() => page.evaluate((pendingSlot) =>
+      JSON.parse(sessionStorage.getItem('supportops.pending-actions.v1') || '{}')[pendingSlot], slot))
+      .toEqual(originalPending);
+
+    await page.unroute('**/api/cases/SEW-1002/activities');
+    await page.reload();
+    await expect(page.getByRole('heading', { name: 'Subscription updates are not appearing' })).toBeVisible();
+    await expect(page.getByRole('button', { name: 'Retry exact save' })).toBeVisible();
+    const restoredPending = await page.evaluate((pendingSlot) =>
+      JSON.parse(sessionStorage.getItem('supportops.pending-actions.v1') || '{}')[pendingSlot], slot);
+    expect(restoredPending).toEqual(originalPending);
+
+    let retriedRequest;
+    page.on('request', (request) => {
+      if (request.method() === 'POST' && request.url().endsWith('/api/cases/SEW-1002/activities')) {
+        retriedRequest = { key: request.headers()['idempotency-key'], payload: request.postDataJSON() };
+      }
+    });
+    await page.getByRole('button', { name: 'Retry exact save' }).click();
+    await expect(page.getByText('Save confirmed from the existing receipt.', { exact: true })).toBeVisible();
+    expect(retriedRequest).toEqual({ key: originalPending.key, payload: originalPending.payload });
+    const { case: saved } = await (await fetch(baseUrl + '/api/cases/SEW-1002')).json();
+    expect(saved.activities.filter((activity) => activity.payload.text === noteText)).toHaveLength(1);
+  } finally {
+    await context?.close();
+    if (server.listening) await new Promise((resolve) => server.close(resolve));
+    db.close();
+    rmSync(directory, { recursive: true, force: true });
+  }
+});
+
 test('interrupted saves retry with the same key and stale conflicts require explicit reconciliation', async ({ page }) => {
   await page.goto('/');
   await page.getByRole('button', { name: /SEW-1002/ }).click();
