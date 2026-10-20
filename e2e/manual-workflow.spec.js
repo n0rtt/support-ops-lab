@@ -26,18 +26,37 @@ async function holdCommittedResponse(page, matcher) {
   return { requestCommitted, responseFulfilled, release };
 }
 
+test('A shows its three linked 401 records and KB inspection without losing the case draft', async ({ page }, testInfo) => {
+  await page.goto('/#SEW-1001');
+  await expect(page.getByRole('heading', { name: 'Nightly API sync returns 401 responses' })).toBeVisible();
+  await expect(page.locator('.linked-evidence-list .diagnostic-card')).toHaveCount(3);
+  await expect(page.locator('.linked-evidence-list')).toContainText('HTTP 401');
+  const note = page.getByLabel('Visible to support operators only');
+  await note.fill('Keep this A draft while inspecting diagnostic and KB context.');
+  await page.locator('#diagnostic-query').fill('req_auth_20261019_001');
+  await page.getByRole('button', { name: 'Search diagnostics' }).click();
+  await expect(page.locator('.diagnostic-result')).toHaveCount(1);
+  await expect(page.locator('.diagnostic-result')).toContainText('DIAG-AUTH-401-001');
+  await page.getByRole('button', { name: /KB-AUTH-01/ }).click();
+  await expect(page.getByRole('heading', { name: /Interpreting API authentication failures/ })).toBeVisible();
+  await expect(page.getByText(/Repeated 401 responses alone do not establish a provider outage/)).toBeVisible();
+  await expect(note).toHaveValue('Keep this A draft while inspecting diagnostic and KB context.');
+  await page.screenshot({ path: testInfo.outputPath('m3-a-investigation.png'), fullPage: true });
+});
+
 test('manual resolution preserves history, simulated labeling, selection, and case draft', async ({ page }) => {
   await page.goto('/');
-  await expect(page.getByText('M2 manual workflow · no AI credentials needed')).toBeVisible();
+  await expect(page.getByText('M3 diagnostic investigation · no AI credentials needed')).toBeVisible();
   await expect(page.getByRole('button', { name: /SEW-1001/ }).getByText('High priority', { exact: true })).toBeVisible();
   await expect(page.getByRole('button', { name: /SEW-1002/ }).getByText('Medium priority', { exact: true })).toBeVisible();
   await expect(page.getByRole('button', { name: /SEW-1003/ }).getByText('Low priority', { exact: true })).toBeVisible();
-  await expect(page).toHaveURL(/#SEW-1003$/);
+  await expect(page).toHaveURL(/#SEW-1001$/);
+  await expect(page.getByRole('heading', { name: 'Nightly API sync returns 401 responses' })).toBeVisible();
   await page.getByRole('button', { name: /SEW-1002/ }).click();
   await expect(page).toHaveURL(/#SEW-1002$/);
   await page.goBack();
-  await expect(page).toHaveURL(/#SEW-1003$/);
-  await expect(page.getByRole('heading', { name: 'Intermittent API failures with no request IDs' })).toBeVisible();
+  await expect(page).toHaveURL(/#SEW-1001$/);
+  await expect(page.getByRole('heading', { name: 'Nightly API sync returns 401 responses' })).toBeVisible();
   await page.goForward();
   await expect(page).toHaveURL(/#SEW-1002$/);
   await expect(page.getByRole('heading', { name: 'Subscription updates are not appearing' })).toBeVisible();
@@ -111,6 +130,101 @@ test('a late save refresh respects the current status filter', async ({ page }) 
 
   await expect(page.getByLabel('Filter cases by status')).toHaveValue('in_progress');
   await expect(cards).toHaveText(['In progress']);
+});
+
+test('B search shows organization-scoped history and supports safe linking and evidence-backed escalation', async ({ page }) => {
+  await page.goto('/#SEW-1002');
+  const note = page.getByLabel('Visible to support operators only');
+  await note.fill('Preserve B context while inspecting diagnostics.');
+  await page.locator('#diagnostic-query').fill('evt_subscription_480');
+  await page.getByRole('button', { name: 'Search diagnostics' }).click();
+  await expect(page.locator('.diagnostic-result')).toHaveCount(4);
+  await expect(page.getByRole('status').filter({ hasText: '4 matching diagnostic rows across 2 organization-scoped events' })).toBeVisible();
+
+  const unrelated = page.locator('.diagnostic-result').filter({ hasText: 'DIAG-OTHER-001' });
+  await unrelated.getByRole('checkbox', { name: 'Select for association' }).check();
+  await page.getByRole('button', { name: 'Link selected evidence to SEW-1002' }).click();
+  await expect(page.getByText(/belongs to another organization: DIAG-OTHER-001/)).toBeVisible();
+  await expect(unrelated.getByRole('checkbox')).toBeChecked();
+  await unrelated.getByRole('checkbox', { name: 'Select for association' }).uncheck();
+
+  const timeoutRow = page.locator('.diagnostic-result').filter({ hasText: 'DIAG-WH-SUB-002' });
+  await timeoutRow.getByRole('button', { name: 'Inspect record and attempts' }).click();
+  await expect(page.getByText('3 attempt records · one organization-scoped event')).toBeVisible();
+  await expect(page.locator('.attempt-history')).toContainText('No HTTP response observed.');
+  await expect(page.locator('.attempt-history')).toContainText('Acknowledged by endpoint; downstream processing not observed.');
+
+  await page.getByRole('button', { name: 'Select all 3 unlinked attempt records for this event' }).click();
+  await expect(page.getByText('Rows selected for SEW-1002: 3')).toBeVisible();
+  await page.getByRole('button', { name: 'Link selected evidence to SEW-1002' }).click();
+  await expect(page.getByText('Saved.', { exact: true })).toBeVisible();
+  await expect(page.locator('.diagnostic-section .section-heading').first()).toContainText('3 associated records');
+
+  await page.getByLabel('Filter cases by status').selectOption('open');
+  await expect(page.getByRole('status').filter({ hasText: 'outside the current Open filter' })).toBeVisible();
+  await expect(note).toHaveValue('Preserve B context while inspecting diagnostics.');
+  await page.getByRole('button', { name: /KB-WEBHOOK-01/ }).click();
+  await expect(page.getByRole('heading', { name: /Webhook retries and endpoint acknowledgment/ })).toBeVisible();
+  await page.getByLabel('Move case to').selectOption('escalated');
+  await page.getByLabel('Escalation reason').fill('Engineering should inspect the endpoint behavior.');
+  await page.getByLabel('Current findings').fill('Three attempts were recorded; the last received HTTP 204 acknowledgment.');
+  await page.getByLabel('Outstanding questions').fill('Did the receiver complete downstream processing?');
+  const escalationEvidence = page.getByRole('group', { name: 'Diagnostic evidence already linked to this case' });
+  await escalationEvidence.getByLabel(/DIAG-WH-SUB-003/).check();
+  await page.getByRole('button', { name: 'Save status and history' }).click();
+  await expect(page.locator('.case-detail .status-escalated')).toBeVisible();
+  await expect(page.locator('.activity-list')).toContainText('Diagnostic evidence in this escalation: DIAG-WH-SUB-003.');
+  await expect(page.getByRole('heading', { name: /Webhook retries and endpoint acknowledgment/ })).toBeVisible();
+  await expect(note).toHaveValue('Preserve B context while inspecting diagnostics.');
+});
+
+test('association conflicts keep the selected IDs for review and a lost acknowledgment retries the same receipt', async ({ page }) => {
+  await page.goto('/#SEW-1002');
+  await page.locator('#diagnostic-query').fill('evt_invoice_731');
+  await page.getByRole('button', { name: 'Search diagnostics' }).click();
+  await expect(page.locator('.diagnostic-result')).toHaveCount(2);
+  const firstInvoiceAttempt = page.locator('.diagnostic-result').filter({ hasText: 'DIAG-WH-INV-001' });
+  await firstInvoiceAttempt.getByRole('checkbox', { name: 'Select for association' }).check();
+
+  const externalUpdate = await page.evaluate(async () => {
+    const { case: current } = await (await fetch('/api/cases/SEW-1002')).json();
+    const response = await fetch('/api/cases/SEW-1002/activities', {
+      method: 'POST',
+      headers: { 'content-type': 'application/json', 'idempotency-key': 'e2e-before-evidence-conflict' },
+      body: JSON.stringify({ type: 'internal_note', text: 'Another view changed B before association.', expectedVersion: current.version }),
+    });
+    return { status: response.status, body: await response.json() };
+  });
+  expect(externalUpdate.status).toBe(200);
+  await page.getByRole('button', { name: 'Link selected evidence to SEW-1002' }).click();
+  await expect(page.getByText(/case changed in another view/)).toBeVisible();
+  await expect(page.getByRole('button', { name: 'Reload case and review draft' })).toBeVisible();
+  await page.getByRole('button', { name: 'Reload case and review draft' }).click();
+  await expect(page.getByText('Latest case history loaded. Your draft remains available for review.')).toBeVisible();
+  await expect(firstInvoiceAttempt.getByRole('checkbox')).toBeChecked();
+  await page.getByRole('button', { name: 'Link selected evidence to SEW-1002' }).click();
+  await expect(page.getByText('Saved.', { exact: true })).toBeVisible();
+
+  const secondInvoiceAttempt = page.locator('.diagnostic-result').filter({ hasText: 'DIAG-WH-INV-002' });
+  await secondInvoiceAttempt.getByRole('checkbox', { name: 'Select for association' }).check();
+  await page.route('**/api/cases/SEW-1002/evidence', async (route) => {
+    const response = await route.fetch();
+    expect(response.status()).toBe(200);
+    await route.abort();
+  });
+  await page.getByRole('button', { name: 'Link selected evidence to SEW-1002' }).click();
+  await expect(page.getByRole('alert').getByText(/connection ended before the save was confirmed/)).toBeVisible();
+  const pending = await page.evaluate(() => JSON.parse(sessionStorage.getItem('supportops.pending-actions.v1') || '{}')['SEW-1002:evidence']);
+  expect(pending).toMatchObject({ type: 'evidence', method: 'POST', state: 'uncertain', payload: { diagnosticIds: ['DIAG-WH-INV-002'] } });
+  await page.unroute('**/api/cases/SEW-1002/evidence');
+  await page.reload();
+  await expect(page.getByRole('button', { name: 'Retry exact save' })).toBeVisible();
+  await expect(page.getByText('Submitted diagnostic rows: DIAG-WH-INV-002')).toBeVisible();
+  await page.getByRole('button', { name: 'Retry exact save' }).click();
+  await expect(page.getByText('Save confirmed from the existing receipt.', { exact: true })).toBeVisible();
+  const { case: saved } = await (await page.request.get('/api/cases/SEW-1002')).json();
+  expect(saved.evidence.map((row) => row.id)).toContain('DIAG-WH-INV-002');
+  expect(saved.activities.filter((activity) => activity.type === 'evidence_linked' && activity.payload.diagnosticIds.includes('DIAG-WH-INV-002'))).toHaveLength(1);
 });
 
 test('a late acknowledgment cannot replace the selected case or redirect its next action', async ({ page }) => {
@@ -224,11 +338,15 @@ test('history timestamps are explicitly UTC and independent of browser timezone'
 test('insufficient-information case can be escalated with an empty evidence list', async ({ page }) => {
   await page.goto('/');
   await page.getByRole('button', { name: /SEW-1003/ }).click();
+  await page.locator('#diagnostic-query').fill('req_missing_case_c_20261020');
+  await page.getByRole('button', { name: 'Search diagnostics' }).click();
+  await expect(page.getByRole('status').filter({ hasText: 'No diagnostic records matched this exact ID' })).toBeVisible();
+  await expect(page.getByRole('heading', { name: 'Intermittent API failures with no request IDs' })).toBeVisible();
   await page.getByLabel('Move case to').selectOption('escalated');
   await page.getByLabel('Escalation reason').fill('The report does not identify an affected request.');
   await page.getByLabel('Current findings').fill('No request ID, exact time, or matching technical evidence is available.');
   await page.getByLabel('Outstanding questions').fill('Which request IDs and UTC time window are affected?');
-  await expect(page.getByText('No diagnostic evidence is linked in M2; this escalation records an empty evidence list.')).toBeVisible();
+  await expect(page.getByText('No evidence is linked. This escalation will record an empty list.')).toBeVisible();
   await page.getByRole('button', { name: 'Save status and history' }).click();
 
   await expect(page.getByText('Status changed from Open to Escalated.')).toBeVisible();

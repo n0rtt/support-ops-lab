@@ -4,6 +4,8 @@ import { dirname, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { DatabaseSync } from 'node:sqlite';
 import { initialCases } from '../fixtures/cases.js';
+import { initialDiagnostics } from '../fixtures/diagnostics.js';
+import { initialKnowledgeEntries } from '../fixtures/knowledge.js';
 
 const serverDirectory = dirname(fileURLToPath(import.meta.url));
 export const projectRoot = realpathSync(resolve(serverDirectory, '..'));
@@ -37,6 +39,19 @@ const migrations = [
           'DROP TABLE activities; ' +
           'ALTER TABLE activities_with_sequence RENAME TO activities; ' +
           'CREATE UNIQUE INDEX activities_case_order ON activities (case_id, sequence)',
+      );
+    },
+  },
+  {
+    version: 4,
+    up(db) {
+      db.exec(
+        "CREATE TABLE diagnostics (id TEXT PRIMARY KEY, organization_id TEXT NOT NULL, kind TEXT NOT NULL CHECK (kind IN ('api_request', 'webhook_attempt')), request_id TEXT, event_id TEXT, event_type TEXT NOT NULL, observed_at TEXT, outcome TEXT NOT NULL CHECK (outcome IN ('failed', 'timed_out', 'acknowledged', 'pending')), http_status INTEGER CHECK (http_status IS NULL OR http_status BETWEEN 100 AND 599), attempt_number INTEGER CHECK (attempt_number IS NULL OR attempt_number > 0), error_code TEXT, error_details TEXT, CHECK ((kind = 'api_request' AND request_id IS NOT NULL AND event_id IS NULL AND attempt_number IS NULL) OR (kind = 'webhook_attempt' AND request_id IS NULL AND event_id IS NOT NULL AND attempt_number IS NOT NULL)), CHECK (outcome <> 'pending' OR (observed_at IS NULL AND http_status IS NULL)), CHECK (outcome <> 'timed_out' OR http_status IS NULL), CHECK (outcome <> 'acknowledged' OR (http_status IS NOT NULL AND http_status BETWEEN 200 AND 299)), UNIQUE (organization_id, event_id, attempt_number)) STRICT; " +
+          'CREATE INDEX diagnostics_request_id ON diagnostics (request_id); ' +
+          'CREATE INDEX diagnostics_event_id ON diagnostics (event_id, organization_id); ' +
+          "CREATE TABLE case_evidence (case_id TEXT NOT NULL REFERENCES cases(id) ON DELETE CASCADE, diagnostic_id TEXT NOT NULL REFERENCES diagnostics(id), linked_at TEXT NOT NULL, source TEXT NOT NULL CHECK (source IN ('synthetic_seed', 'operator')), PRIMARY KEY (case_id, diagnostic_id)) STRICT; " +
+          'CREATE INDEX case_evidence_diagnostic_id ON case_evidence (diagnostic_id); ' +
+          'CREATE TABLE knowledge_entries (id TEXT PRIMARY KEY, version INTEGER NOT NULL CHECK (version > 0), title TEXT NOT NULL, content TEXT NOT NULL) STRICT;',
       );
     },
   },
@@ -119,6 +134,57 @@ function seedIfEmpty(db) {
 export function initializeDatabase(db) {
   migrate(db);
   seedIfEmpty(db);
+  withTransaction(db, () => seedTechnicalFixtures(db));
+}
+
+function insertDiagnosticFixtures(db) {
+  const insert = db.prepare(
+    'INSERT INTO diagnostics (id, organization_id, kind, request_id, event_id, event_type, observed_at, outcome, http_status, attempt_number, error_code, error_details) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?) ON CONFLICT(id) DO NOTHING',
+  );
+  for (const item of initialDiagnostics) {
+    insert.run(
+      item.id, item.organizationId, item.kind, item.requestId, item.eventId, item.eventType,
+      item.observedAt, item.outcome, item.httpStatus, item.attemptNumber, item.errorCode, item.errorDetails,
+    );
+  }
+}
+
+function seedTechnicalFixtures(db, now = new Date().toISOString()) {
+  insertDiagnosticFixtures(db);
+  const insertKnowledge = db.prepare(
+    'INSERT INTO knowledge_entries (id, version, title, content) VALUES (?, ?, ?, ?) ON CONFLICT(id) DO NOTHING',
+  );
+  for (const item of initialKnowledgeEntries) insertKnowledge.run(item.id, item.version, item.title, item.content);
+
+  const caseRow = db.prepare('SELECT organization_id FROM cases WHERE id = ?').get('SEW-1001');
+  if (!caseRow || caseRow.organization_id !== 'ORG-ALDER-01') return;
+  const seedIds = initialDiagnostics.filter((item) => item.organizationId === 'ORG-ALDER-01').map((item) => item.id);
+  const rows = db.prepare(
+    'SELECT id, organization_id FROM diagnostics WHERE id IN (' + seedIds.map(() => '?').join(', ') + ')',
+  ).all(...seedIds);
+  if (rows.length !== seedIds.length || rows.some((row) => row.organization_id !== caseRow.organization_id)) {
+    throw new Error('Synthetic diagnostic seed identifiers conflict with existing data.');
+  }
+  const linked = new Set(
+    db.prepare('SELECT diagnostic_id FROM case_evidence WHERE case_id = ?').all('SEW-1001').map((row) => row.diagnostic_id),
+  );
+  const addedIds = seedIds.filter((id) => !linked.has(id));
+  if (addedIds.length === 0) return;
+
+  const insertEvidence = db.prepare(
+    "INSERT INTO case_evidence (case_id, diagnostic_id, linked_at, source) VALUES ('SEW-1001', ?, ?, 'synthetic_seed')",
+  );
+  for (const id of addedIds) insertEvidence.run(id, now);
+  const activityId = 'ACT-' + randomUUID();
+  const sequence = nextActivitySequence(db, 'SEW-1001');
+  db.prepare('UPDATE cases SET updated_at = ?, version = version + 1 WHERE id = ?').run(now, 'SEW-1001');
+  db.prepare(
+    'INSERT INTO activities (id, case_id, created_at, activity_type, payload, sequence) VALUES (?, ?, ?, ?, ?, ?)',
+  ).run(activityId, 'SEW-1001', now, 'evidence_seeded', JSON.stringify({
+    source: 'synthetic_seed',
+    diagnosticIds: addedIds,
+    note: 'Synthetic demo evidence associations installed during initialization.',
+  }), sequence);
 }
 
 function mapCase(row) {
@@ -159,7 +225,77 @@ export function getCase(db, caseId) {
       payload: JSON.parse(activity.payload),
       sequence: activity.sequence,
     }));
+  item.evidence = db.prepare(
+    'SELECT d.id, d.organization_id, d.kind, d.request_id, d.event_id, d.event_type, d.observed_at, d.outcome, d.http_status, d.attempt_number, d.error_code, d.error_details, e.linked_at, e.source FROM case_evidence AS e JOIN diagnostics AS d ON d.id = e.diagnostic_id WHERE e.case_id = ? ORDER BY e.linked_at, d.id',
+  ).all(caseId).map(mapDiagnostic);
   return item;
+}
+
+function mapDiagnostic(row) {
+  return {
+    id: row.id,
+    organizationId: row.organization_id,
+    kind: row.kind,
+    requestId: row.request_id,
+    eventId: row.event_id,
+    eventType: row.event_type,
+    observedAt: row.observed_at,
+    outcome: row.outcome,
+    httpStatus: row.http_status,
+    attemptNumber: row.attempt_number,
+    errorCode: row.error_code,
+    errorDetails: row.error_details,
+    ...(row.linked_at === undefined ? {} : { linkedAt: row.linked_at, source: row.source }),
+  };
+}
+
+const diagnosticSelect =
+  'SELECT id, organization_id, kind, request_id, event_id, event_type, observed_at, outcome, http_status, attempt_number, error_code, error_details FROM diagnostics';
+
+export function searchDiagnostics(db, query) {
+  const matches = db.prepare(
+    diagnosticSelect + ' WHERE id = ? COLLATE BINARY OR request_id = ? COLLATE BINARY OR event_id = ? COLLATE BINARY ORDER BY kind, event_id, request_id, attempt_number, observed_at, id',
+  ).all(query, query, query).map(mapDiagnostic);
+  const seen = new Set();
+  const histories = [];
+  for (const match of matches) {
+    if (match.kind !== 'webhook_attempt') continue;
+    const key = JSON.stringify([match.organizationId, match.eventId]);
+    if (seen.has(key)) continue;
+    seen.add(key);
+    histories.push({
+      organizationId: match.organizationId,
+      eventId: match.eventId,
+      attempts: db.prepare(
+        diagnosticSelect + ' WHERE organization_id = ? COLLATE BINARY AND event_id = ? COLLATE BINARY ORDER BY attempt_number, id',
+      ).all(match.organizationId, match.eventId).map(mapDiagnostic),
+    });
+  }
+  return { matches, histories };
+}
+
+export function getDiagnostic(db, diagnosticId) {
+  const row = db.prepare(diagnosticSelect + ' WHERE id = ?').get(diagnosticId);
+  if (!row) return null;
+  const diagnostic = mapDiagnostic(row);
+  const attempts = diagnostic.kind === 'webhook_attempt'
+    ? db.prepare(diagnosticSelect + ' WHERE organization_id = ? COLLATE BINARY AND event_id = ? COLLATE BINARY ORDER BY attempt_number, id')
+      .all(diagnostic.organizationId, diagnostic.eventId).map(mapDiagnostic)
+    : [];
+  return { diagnostic, attempts };
+}
+
+export function listKnowledgeEntries(db) {
+  return db.prepare('SELECT id, version, title FROM knowledge_entries ORDER BY id').all().map((row) => ({
+    id: row.id,
+    version: row.version,
+    title: row.title,
+  }));
+}
+
+export function getKnowledgeEntry(db, entryId) {
+  const row = db.prepare('SELECT id, version, title, content FROM knowledge_entries WHERE id = ?').get(entryId);
+  return row ? { id: row.id, version: row.version, title: row.title, content: row.content } : null;
 }
 
 function nextActivitySequence(db, caseId) {
@@ -177,6 +313,68 @@ export function appendCaseActivity(db, { caseId, type, text, now = new Date().to
   return { changed: true, response: { caseId, activityId: id, version } };
 }
 
+function inspectEvidenceIds(db, caseId, organizationId, ids) {
+  const uniqueIds = [...new Set(ids)];
+  const rows = uniqueIds.length
+    ? db.prepare('SELECT id, organization_id FROM diagnostics WHERE id IN (' + uniqueIds.map(() => '?').join(', ') + ')').all(...uniqueIds)
+    : [];
+  const rowsById = new Map(rows.map((row) => [row.id, row]));
+  const linked = new Set(uniqueIds.length
+    ? db.prepare('SELECT diagnostic_id FROM case_evidence WHERE case_id = ? AND diagnostic_id IN (' + uniqueIds.map(() => '?').join(', ') + ')')
+      .all(caseId, ...uniqueIds).map((row) => row.diagnostic_id)
+    : []);
+  return {
+    uniqueIds,
+    rowsById,
+    linked,
+    notFoundIds: uniqueIds.filter((id) => !rowsById.has(id)),
+    differentOrganizationIds: uniqueIds.filter((id) => rowsById.has(id) && rowsById.get(id).organization_id !== organizationId),
+    unlinkedIds: uniqueIds.filter((id) => rowsById.has(id) && rowsById.get(id).organization_id === organizationId && !linked.has(id)),
+  };
+}
+
+export class InvalidEvidenceAssociationError extends Error {
+  constructor(details) {
+    super('One or more diagnostic records cannot be associated with this case.');
+    this.code = 'evidence_association_rejected';
+    this.details = details;
+  }
+}
+
+export function associateCaseEvidence(db, { caseId, diagnosticIds, now = new Date().toISOString() }) {
+  const caseRow = db.prepare('SELECT organization_id, version FROM cases WHERE id = ?').get(caseId);
+  if (!caseRow) throw new CaseNotFoundError();
+  const inspected = inspectEvidenceIds(db, caseId, caseRow.organization_id, diagnosticIds);
+  if (inspected.notFoundIds.length || inspected.differentOrganizationIds.length) {
+    throw new InvalidEvidenceAssociationError({
+      notFoundIds: inspected.notFoundIds,
+      differentOrganizationIds: inspected.differentOrganizationIds,
+    });
+  }
+
+  const addedIds = inspected.uniqueIds.filter((id) => !inspected.linked.has(id));
+  const alreadyLinkedIds = inspected.uniqueIds.filter((id) => inspected.linked.has(id));
+  if (addedIds.length === 0) {
+    return {
+      changed: false,
+      response: { caseId, addedIds, alreadyLinkedIds, version: caseRow.version },
+    };
+  }
+
+  const insert = db.prepare(
+    "INSERT INTO case_evidence (case_id, diagnostic_id, linked_at, source) VALUES (?, ?, ?, 'operator')",
+  );
+  for (const id of addedIds) insert.run(caseId, id, now);
+  const activityId = 'ACT-' + randomUUID();
+  const sequence = nextActivitySequence(db, caseId);
+  db.prepare('UPDATE cases SET updated_at = ?, version = version + 1 WHERE id = ?').run(now, caseId);
+  db.prepare(
+    'INSERT INTO activities (id, case_id, created_at, activity_type, payload, sequence) VALUES (?, ?, ?, ?, ?, ?)',
+  ).run(activityId, caseId, now, 'evidence_linked', JSON.stringify({ source: 'operator', diagnosticIds: addedIds }), sequence);
+  const version = db.prepare('SELECT version FROM cases WHERE id = ?').get(caseId).version;
+  return { changed: true, response: { caseId, addedIds, alreadyLinkedIds, activityId, version } };
+}
+
 const allowedTransitions = {
   open: new Set(['in_progress', 'escalated', 'resolved']),
   in_progress: new Set(['escalated', 'resolved']),
@@ -192,9 +390,10 @@ export class InvalidCaseTransitionError extends Error {
 }
 
 export class InvalidEscalationEvidenceError extends Error {
-  constructor() {
-    super('Diagnostic evidence is unavailable in this milestone.');
+  constructor(details = {}) {
+    super('Escalation evidence must already be linked to this case.');
     this.code = 'invalid_evidence';
+    this.details = details;
   }
 }
 
@@ -206,7 +405,7 @@ export class InvalidStatusContextError extends Error {
 }
 
 export function changeCaseStatus(db, { caseId, status, context = {}, now = new Date().toISOString() }) {
-  const current = db.prepare('SELECT status FROM cases WHERE id = ?').get(caseId);
+  const current = db.prepare('SELECT status, organization_id FROM cases WHERE id = ?').get(caseId);
   if (current.status === status) {
     return {
       changed: false,
@@ -214,11 +413,22 @@ export function changeCaseStatus(db, { caseId, status, context = {}, now = new D
     };
   }
   if (!allowedTransitions[current.status]?.has(status)) throw new InvalidCaseTransitionError();
+  let activityContext = context;
   if (status === 'escalated') {
     if (typeof context.reason !== 'string' || !context.reason.trim()) throw new InvalidStatusContextError('invalid_escalation_reason');
     if (typeof context.findings !== 'string' || !context.findings.trim()) throw new InvalidStatusContextError('invalid_escalation_findings');
     if (typeof context.questions !== 'string' || context.questions.length > 10000) throw new InvalidStatusContextError('invalid_escalation_questions');
-    if (!Array.isArray(context.evidenceIds) || context.evidenceIds.length !== 0) throw new InvalidEscalationEvidenceError();
+    if (!Array.isArray(context.evidenceIds)) throw new InvalidEscalationEvidenceError();
+    const inspected = inspectEvidenceIds(db, caseId, current.organization_id, context.evidenceIds);
+    const details = {
+      notFoundIds: inspected.notFoundIds,
+      differentOrganizationIds: inspected.differentOrganizationIds,
+      unlinkedIds: inspected.unlinkedIds,
+    };
+    if (details.notFoundIds.length || details.differentOrganizationIds.length || details.unlinkedIds.length) {
+      throw new InvalidEscalationEvidenceError(details);
+    }
+    activityContext = { ...context, evidenceIds: inspected.uniqueIds };
   }
   if (status === 'resolved' && (typeof context.outcome !== 'string' || !context.outcome.trim())) {
     throw new InvalidStatusContextError('invalid_resolution_outcome');
@@ -233,7 +443,7 @@ export function changeCaseStatus(db, { caseId, status, context = {}, now = new D
   );
   db.prepare(
     'INSERT INTO activities (id, case_id, created_at, activity_type, payload, sequence) VALUES (?, ?, ?, ?, ?, ?)',
-  ).run(activityId, caseId, now, 'status_changed', JSON.stringify({ from: current.status, to: status, ...context }), sequence);
+  ).run(activityId, caseId, now, 'status_changed', JSON.stringify({ from: current.status, to: status, ...activityContext }), sequence);
   const version = db.prepare('SELECT version FROM cases WHERE id = ?').get(caseId).version;
   return { changed: true, response: { caseId, status, activityId, version } };
 }
@@ -387,10 +597,11 @@ export function resetDemoDatabase({ databasePath = demoDatabasePath, confirmed =
 
   const db = openDemoDatabase();
   try {
-    initializeDatabase(db);
+    migrate(db);
     withTransaction(db, () => {
-      db.exec('DELETE FROM mutation_receipts; DELETE FROM activities; DELETE FROM cases;');
+      db.exec('DELETE FROM mutation_receipts; DELETE FROM case_evidence; DELETE FROM activities; DELETE FROM diagnostics; DELETE FROM knowledge_entries; DELETE FROM cases;');
       insertInitialCases(db);
+      seedTechnicalFixtures(db);
     });
   } finally {
     db.close();

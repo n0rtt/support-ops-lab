@@ -45,7 +45,21 @@ function displayValue(value) {
 }
 
 function formatDate(value) {
-  return new Intl.DateTimeFormat('en-GB', { dateStyle: 'medium', timeStyle: 'short', timeZone: 'UTC' }).format(new Date(value)) + ' UTC';
+  if (!value) return 'Unknown; no observed timestamp';
+  const date = new Date(value);
+  if (Number.isNaN(date.getTime())) return value;
+  return new Intl.DateTimeFormat('en-GB', { dateStyle: 'medium', timeStyle: 'short', timeZone: 'UTC' }).format(date) + ' UTC';
+}
+
+function observedOutcome(diagnostic) {
+  if (diagnostic.outcome === 'acknowledged') return 'Acknowledged by endpoint; downstream processing not observed.';
+  if (diagnostic.outcome === 'timed_out') return 'No HTTP response observed.';
+  if (diagnostic.outcome === 'pending') return 'Pending retry; no observed delivery time or response.';
+  return 'Observed failure.';
+}
+
+function sameIds(left = [], right = []) {
+  return left.length === right.length && left.every((id, index) => id === right[index]);
 }
 
 function activityLabel(activity) {
@@ -65,9 +79,37 @@ function activitySummary(activity) {
   if (payload.reason) lines.push(`Escalation reason: ${payload.reason}`);
   if (payload.findings) lines.push(`Findings: ${payload.findings}`);
   if (payload.questions !== undefined) lines.push(`Outstanding questions: ${payload.questions || 'None recorded.'}`);
-  if (payload.to === 'escalated') lines.push('Diagnostic evidence: None linked.');
+  if (payload.to === 'escalated') {
+    lines.push(payload.evidenceIds?.length
+      ? `Diagnostic evidence in this escalation: ${payload.evidenceIds.join(', ')}.`
+      : 'Diagnostic evidence: None linked.');
+  }
+  if (activity.type === 'evidence_seeded' || activity.type === 'evidence_linked') {
+    lines.push(`${payload.source === 'synthetic_seed' ? 'Synthetic seed linked' : 'Evidence linked'}: ${(payload.diagnosticIds || []).join(', ')}.`);
+  }
   if (payload.outcome) lines.push(`Resolution outcome: ${payload.outcome}`);
   return lines.join('\n');
+}
+
+function DiagnosticFacts({ diagnostic }) {
+  return (
+    <dl className="diagnostic-facts">
+      <div><dt>Diagnostic row ID</dt><dd>{diagnostic.id}</dd></div>
+      <div><dt>Organization</dt><dd>{diagnostic.organizationId}</dd></div>
+      <div><dt>Record type</dt><dd>{displayValue(diagnostic.kind)}</dd></div>
+      <div><dt>Request / event type</dt><dd>{diagnostic.eventType}</dd></div>
+      <div><dt>Request ID</dt><dd>{diagnostic.requestId || 'Not applicable'}</dd></div>
+      <div><dt>Event ID</dt><dd>{diagnostic.eventId || 'Not applicable'}</dd></div>
+      <div><dt>Attempt</dt><dd>{diagnostic.attemptNumber ?? 'Not applicable'}</dd></div>
+      <div><dt>Observed time</dt><dd>{formatDate(diagnostic.observedAt)}</dd></div>
+      <div><dt>HTTP response</dt><dd>{diagnostic.httpStatus === null
+        ? ['timed_out', 'pending'].includes(diagnostic.outcome) ? 'No HTTP response observed' : 'Unknown; no HTTP status recorded'
+        : `HTTP ${diagnostic.httpStatus}`}</dd></div>
+      <div><dt>Observed outcome</dt><dd>{observedOutcome(diagnostic)}</dd></div>
+      {diagnostic.errorCode && <div><dt>Sanitized error code</dt><dd>{diagnostic.errorCode}</dd></div>}
+      {diagnostic.errorDetails && <div className="diagnostic-fact-wide"><dt>Technical detail</dt><dd>{diagnostic.errorDetails}</dd></div>}
+    </dl>
+  );
 }
 
 function App() {
@@ -93,6 +135,28 @@ function App() {
   const [queueError, setQueueError] = useState('');
   const [busySlot, setBusySlot] = useState('');
   const [feedback, setFeedback] = useState({});
+  const [diagnosticQuery, setDiagnosticQuery] = useState('');
+  const [diagnosticMatches, setDiagnosticMatches] = useState([]);
+  const [diagnosticHistories, setDiagnosticHistories] = useState([]);
+  const [diagnosticSearchState, setDiagnosticSearchState] = useState('idle');
+  const [diagnosticSearchError, setDiagnosticSearchError] = useState('');
+  const [diagnosticDetail, setDiagnosticDetail] = useState(null);
+  const [knowledgeEntries, setKnowledgeEntries] = useState([]);
+  const [knowledgeEntry, setKnowledgeEntry] = useState(null);
+  const [knowledgeError, setKnowledgeError] = useState('');
+  const diagnosticSearchRequestRef = useRef(0);
+  const diagnosticDetailRequestRef = useRef(0);
+  const knowledgeRequestRef = useRef(0);
+
+  useEffect(() => {
+    fetch('/api/knowledge')
+      .then(async (response) => {
+        if (!response.ok) throw new Error('knowledge_unavailable');
+        return response.json();
+      })
+      .then(({ entries }) => setKnowledgeEntries(entries))
+      .catch(() => setKnowledgeError('The knowledge base could not be loaded. Case work remains available.'));
+  }, []);
 
   function applyCaseDetail(item, generation) {
     if (selectedIdRef.current !== item.id || selectionGenerationRef.current !== generation) return;
@@ -207,6 +271,78 @@ function App() {
     }));
   }
 
+  function updateDiagnosticSelection(caseId, ids, selected) {
+    setDrafts((current) => {
+      const draft = current[caseId] || {};
+      const selectedIds = Array.isArray(draft.selectedDiagnosticIds) ? draft.selectedDiagnosticIds : [];
+      const nextIds = selected
+        ? [...new Set([...selectedIds, ...ids])]
+        : selectedIds.filter((id) => !ids.includes(id));
+      return { ...current, [caseId]: { ...draft, selectedDiagnosticIds: nextIds } };
+    });
+  }
+
+  async function searchDiagnostics(event) {
+    event.preventDefault();
+    const query = diagnosticQuery.trim();
+    if (!query) {
+      setDiagnosticSearchError('Enter an exact request, event, or diagnostic row ID.');
+      setDiagnosticSearchState('error');
+      setDiagnosticMatches([]);
+      setDiagnosticHistories([]);
+      return;
+    }
+    const request = ++diagnosticSearchRequestRef.current;
+    setDiagnosticSearchState('loading');
+    setDiagnosticSearchError('');
+    setDiagnosticMatches([]);
+    setDiagnosticHistories([]);
+    setDiagnosticDetail(null);
+    try {
+      const response = await fetch('/api/diagnostics?q=' + encodeURIComponent(query));
+      const body = await response.json().catch(() => ({}));
+      if (!response.ok) throw new Error(body.error || 'diagnostic_search_unavailable');
+      if (request !== diagnosticSearchRequestRef.current) return;
+      setDiagnosticMatches(body.matches);
+      setDiagnosticHistories(body.histories);
+      setDiagnosticSearchState('ready');
+    } catch {
+      if (request !== diagnosticSearchRequestRef.current) return;
+      setDiagnosticSearchError('Diagnostic search is unavailable. Your active case and drafts remain available.');
+      setDiagnosticSearchState('error');
+    }
+  }
+
+  async function inspectDiagnostic(diagnosticId) {
+    const request = ++diagnosticDetailRequestRef.current;
+    setDiagnosticDetail({ diagnosticId, state: 'loading' });
+    try {
+      const response = await fetch('/api/diagnostics/' + encodeURIComponent(diagnosticId));
+      const body = await response.json().catch(() => ({}));
+      if (!response.ok) throw new Error(body.error || 'diagnostic_detail_unavailable');
+      if (request === diagnosticDetailRequestRef.current) setDiagnosticDetail({ diagnosticId, state: 'ready', body });
+    } catch {
+      if (request === diagnosticDetailRequestRef.current) setDiagnosticDetail({ diagnosticId, state: 'error' });
+    }
+  }
+
+  async function inspectKnowledge(entryId) {
+    if (knowledgeEntry?.entry?.id === entryId) {
+      setKnowledgeEntry(null);
+      return;
+    }
+    const request = ++knowledgeRequestRef.current;
+    setKnowledgeEntry({ id: entryId, state: 'loading' });
+    try {
+      const response = await fetch('/api/knowledge/' + encodeURIComponent(entryId));
+      const body = await response.json().catch(() => ({}));
+      if (!response.ok) throw new Error(body.error || 'knowledge_unavailable');
+      if (request === knowledgeRequestRef.current) setKnowledgeEntry({ id: entryId, state: 'ready', entry: body.entry });
+    } catch {
+      if (request === knowledgeRequestRef.current) setKnowledgeEntry({ id: entryId, state: 'error' });
+    }
+  }
+
   function storePending(slot, action) {
     const next = { ...pendingRequestsRef.current, [slot]: action };
     pendingRequestsRef.current = next;
@@ -250,10 +386,23 @@ function App() {
     applyCaseDetail(body.case, generation);
   }
 
-  function describeFailure(status, code) {
+  function describeFailure(status, code, details = {}) {
     if (status === 409 && code === 'stale_case') return 'This case changed in another view. The action was not applied. Refresh the case and review your saved draft before trying again.';
     if (status === 409 && code === 'idempotency_key_reused') return 'This request key is already tied to different content. The action was not applied; refresh the case before continuing.';
     if (status === 409 && code === 'invalid_transition') return 'That status change is not allowed. The case and your draft were preserved.';
+    if (code === 'evidence_association_rejected') {
+      const problems = [];
+      if (details.notFoundIds?.length) problems.push('not found: ' + details.notFoundIds.join(', '));
+      if (details.differentOrganizationIds?.length) problems.push('belongs to another organization: ' + details.differentOrganizationIds.join(', '));
+      return 'Evidence was not linked (' + (problems.join('; ') || 'check the selected diagnostic IDs') + '). Your selection and other drafts were preserved.';
+    }
+    if (code === 'invalid_evidence' && (details.unlinkedIds?.length || details.differentOrganizationIds?.length || details.notFoundIds?.length)) {
+      const problems = [];
+      if (details.notFoundIds?.length) problems.push('not found: ' + details.notFoundIds.join(', '));
+      if (details.differentOrganizationIds?.length) problems.push('belongs to another organization: ' + details.differentOrganizationIds.join(', '));
+      if (details.unlinkedIds?.length) problems.push('not linked to this case: ' + details.unlinkedIds.join(', '));
+      return 'Escalation evidence was rejected (' + problems.join('; ') + '). Your draft was preserved.';
+    }
     if (status === 503) return 'The database is busy. Your exact request is saved here and can be retried safely.';
     if (status >= 500) return 'The save failed. Your exact request and draft are still saved here; retry the same request.';
     return 'The save was rejected (' + (code || 'invalid_request') + '). Your draft was preserved.';
@@ -278,7 +427,7 @@ function App() {
         } else {
           clearPending(slot);
         }
-        setFeedback((current) => ({ ...current, [slot]: describeFailure(response.status, body.error) }));
+        setFeedback((current) => ({ ...current, [slot]: describeFailure(response.status, body.error, body.details) }));
         return;
       }
 
@@ -300,6 +449,15 @@ function App() {
             : current;
         });
       }
+      if (action.type === 'evidence') {
+        setDrafts((current) => {
+          const draft = current[action.caseId] || {};
+          const selectedIds = Array.isArray(draft.selectedDiagnosticIds) ? draft.selectedDiagnosticIds : [];
+          return sameIds(selectedIds, action.payload.diagnosticIds)
+            ? { ...current, [action.caseId]: { ...draft, selectedDiagnosticIds: [] } }
+            : current;
+        });
+      }
       if (action.type === 'status') {
         setDrafts((current) => {
           const draft = current[action.caseId] || {};
@@ -307,7 +465,8 @@ function App() {
             action.payload.status === 'escalated'
               ? (draft.escalationReason || '') === action.payload.reason &&
                 (draft.escalationFindings || '') === action.payload.findings &&
-                (draft.outstandingQuestions || '') === action.payload.questions
+                (draft.outstandingQuestions || '') === action.payload.questions &&
+                sameIds(draft.escalationEvidenceIds || [], action.payload.evidenceIds || [])
               : action.payload.status === 'resolved'
                 ? (draft.resolutionOutcome || '') === action.payload.outcome
                 : true
@@ -321,6 +480,7 @@ function App() {
                   escalationReason: '',
                   escalationFindings: '',
                   outstandingQuestions: '',
+                  escalationEvidenceIds: [],
                   resolutionOutcome: '',
                 },
               }
@@ -388,7 +548,7 @@ function App() {
         reason: draft.escalationReason || '',
         findings: draft.escalationFindings || '',
         questions: draft.outstandingQuestions || '',
-        evidenceIds: [],
+        evidenceIds: draft.escalationEvidenceIds || [],
       });
     }
     if (status === 'resolved') payload.outcome = draft.resolutionOutcome || '';
@@ -400,6 +560,26 @@ function App() {
       path: '/api/cases/' + encodeURIComponent(caseId) + '/status',
       key: crypto.randomUUID(),
       payload,
+      state: 'uncertain',
+    };
+    storePending(slot, action);
+    sendPending(slot, action);
+  }
+
+  function submitEvidence(event) {
+    event.preventDefault();
+    if (!selectedCase || selectedIdRef.current !== selectedCase.id) return;
+    const caseId = selectedCase.id;
+    const diagnosticIds = [...new Set(drafts[caseId]?.selectedDiagnosticIds || [])];
+    if (diagnosticIds.length === 0) return;
+    const slot = caseId + ':evidence';
+    const action = {
+      caseId,
+      type: 'evidence',
+      method: 'POST',
+      path: '/api/cases/' + encodeURIComponent(caseId) + '/evidence',
+      key: crypto.randomUUID(),
+      payload: { diagnosticIds, expectedVersion: selectedCase.version },
       state: 'uncertain',
     };
     storePending(slot, action);
@@ -419,6 +599,12 @@ function App() {
 
   const activeCase = selectedCase?.id === selectedId ? selectedCase : null;
   const selectedDraft = activeCase ? drafts[activeCase.id] || {} : {};
+  const selectedDiagnosticIds = selectedDraft.selectedDiagnosticIds || [];
+  const escalationEvidenceIds = selectedDraft.escalationEvidenceIds || [];
+  const evidenceSlot = activeCase ? activeCase.id + ':evidence' : '';
+  const pendingEvidence = evidenceSlot ? pendingRequests[evidenceSlot] : null;
+  const matchedAttemptRows = diagnosticMatches.filter((item) => item.kind === 'webhook_attempt');
+  const matchedEventCount = new Set(matchedAttemptRows.map((item) => JSON.stringify([item.organizationId, item.eventId]))).size;
   const statusSlot = activeCase ? activeCase.id + ':status' : '';
   const pendingStatus = statusSlot ? pendingRequests[statusSlot] : null;
   const requestedOutcome = pendingStatus?.payload?.status === 'resolved' ? pendingStatus.payload.outcome : undefined;
@@ -440,7 +626,7 @@ function App() {
           <span className="brand-mark" aria-hidden="true">S</span>
           <span>Support Engineering Workbench</span>
         </a>
-        <span className="mode-label">M2 manual workflow · no AI credentials needed</span>
+        <span className="mode-label">M3 diagnostic investigation · no AI credentials needed</span>
       </header>
 
       <main className="workspace">
@@ -523,6 +709,155 @@ function App() {
                   <div><dt>Last activity</dt><dd>{formatDate(activeCase.updatedAt)}</dd></div>
                 </dl>
 
+                <section className="diagnostic-section" aria-labelledby="evidence-title">
+                  <div className="section-heading">
+                    <div><h3 id="evidence-title">Diagnostic evidence</h3><p className="field-hint">Read-only synthetic records. A linked record is a specific diagnostic row, not a live event subscription.</p></div>
+                    <span>{activeCase.evidence.length} associated records</span>
+                  </div>
+                  {activeCase.evidence.length ? (
+                    <div className="linked-evidence-list">
+                      {activeCase.evidence.map((diagnostic) => (
+                        <article className="diagnostic-card" key={diagnostic.id}>
+                          <div className="diagnostic-card-heading">
+                            <strong>{diagnostic.id}</strong>
+                            <span>{diagnostic.source === 'synthetic_seed' ? 'Synthetic seed association' : 'Operator association'}</span>
+                          </div>
+                          <DiagnosticFacts diagnostic={diagnostic} />
+                          <button type="button" onClick={() => inspectDiagnostic(diagnostic.id)}>Inspect record and attempts</button>
+                        </article>
+                      ))}
+                    </div>
+                  ) : <p className="empty-diagnostics">No diagnostic evidence is associated with this case.</p>}
+
+                  <form className="diagnostic-search-form" onSubmit={searchDiagnostics}>
+                    <label htmlFor="diagnostic-query">Search globally by exact request ID, event ID, or diagnostic row ID</label>
+                    <div><input id="diagnostic-query" type="search" maxLength={200} value={diagnosticQuery} onChange={(event) => setDiagnosticQuery(event.target.value)} />
+                      <button type="submit" disabled={diagnosticSearchState === 'loading'}>Search diagnostics</button></div>
+                    <p className="field-hint">Search is global and may show other organizations. A result is not linked until you explicitly associate its selected row IDs.</p>
+                  </form>
+                  {diagnosticSearchError && <p className="notice notice-error" role="alert">{diagnosticSearchError}</p>}
+                  {diagnosticSearchState === 'loading' && <p role="status">Searching diagnostic records…</p>}
+                  {pendingEvidence && <PendingAction slot={evidenceSlot} action={pendingEvidence} busySlot={busySlot} feedback={feedback} retry={sendPending} reconcile={reconcileConflict} />}
+                  {!pendingEvidence && feedback[evidenceSlot] && <p className="save-feedback" role="status">{feedback[evidenceSlot]}</p>}
+                  {diagnosticSearchState === 'ready' && diagnosticMatches.length === 0 && (
+                    <p className="empty-diagnostics" role="status">No diagnostic records matched this exact ID. A missing result does not establish a failure.</p>
+                  )}
+                  {diagnosticSearchState === 'ready' && diagnosticMatches.length > 0 && (
+                    <>
+                      <p className="diagnostic-search-summary" role="status">
+                        {diagnosticMatches.length} matching diagnostic {diagnosticMatches.length === 1 ? 'row' : 'rows'}
+                        {matchedAttemptRows.length > 0 ? ` across ${matchedEventCount} organization-scoped events` : ' for API requests'}.
+                        {' '}Attempt rows are not unique events or completed deliveries.
+                      </p>
+                      <form className="evidence-association-form" onSubmit={submitEvidence}>
+                        <ul className="diagnostic-results">
+                          {diagnosticMatches.map((diagnostic, index) => {
+                            const linked = activeCase.evidence.some((item) => item.id === diagnostic.id);
+                            const history = diagnosticHistories.find((item) => item.organizationId === diagnostic.organizationId && item.eventId === diagnostic.eventId);
+                            const selected = selectedDiagnosticIds.includes(diagnostic.id);
+                            const historyKey = JSON.stringify([diagnostic.organizationId, diagnostic.eventId]);
+                            const firstHistoryMatch = diagnostic.kind === 'webhook_attempt' && diagnosticMatches.findIndex((item) => JSON.stringify([item.organizationId, item.eventId]) === historyKey) === index;
+                            const selectableAttemptIds = history?.attempts.filter((item) => !activeCase.evidence.some((linkedItem) => linkedItem.id === item.id)).map((item) => item.id) || [];
+                            return (
+                              <li className="diagnostic-result" key={diagnostic.id}>
+                                <div className="diagnostic-result-heading">
+                                  <label htmlFor={'select-diagnostic-' + diagnostic.id}>
+                                    <input
+                                      id={'select-diagnostic-' + diagnostic.id}
+                                      type="checkbox"
+                                      checked={linked || selected}
+                                      disabled={linked}
+                                      onChange={(event) => updateDiagnosticSelection(activeCase.id, [diagnostic.id], event.target.checked)}
+                                    />
+                                    {linked ? 'Already associated' : 'Select for association'}
+                                  </label>
+                                  <strong>{diagnostic.id}</strong>
+                                  <span>{diagnostic.organizationId}</span>
+                                </div>
+                                <p>{diagnostic.kind === 'webhook_attempt'
+                                  ? `Event ${diagnostic.eventId} · attempt ${diagnostic.attemptNumber} · ${history?.attempts.length || 1} records in this organization-scoped event`
+                                  : `Request ${diagnostic.requestId}`}</p>
+                                <p>{observedOutcome(diagnostic)}</p>
+                                <button type="button" onClick={() => inspectDiagnostic(diagnostic.id)}>Inspect record and attempts</button>
+                                {firstHistoryMatch && selectableAttemptIds.length > 1 && (
+                                  <button type="button" onClick={() => updateDiagnosticSelection(activeCase.id, selectableAttemptIds, true)}>
+                                    Select all {selectableAttemptIds.length} unlinked attempt records for this event
+                                  </button>
+                                )}
+                              </li>
+                            );
+                          })}
+                        </ul>
+                        <div className="selected-diagnostics">
+                          <strong>Rows selected for {activeCase.id}: {selectedDiagnosticIds.length}</strong>
+                          {selectedDiagnosticIds.length > 0 && (
+                            <ul>{selectedDiagnosticIds.map((id) => <li key={id}>{id}
+                              <button type="button" aria-label={'Remove ' + id + ' from selection'} onClick={() => updateDiagnosticSelection(activeCase.id, [id], false)}>Remove</button>
+                            </li>)}</ul>
+                          )}
+                        </div>
+                        <button type="submit" disabled={!selectedDiagnosticIds.length || Boolean(busySlot) || Boolean(pendingEvidence)}>
+                          Link selected evidence to {activeCase.id}
+                        </button>
+                      </form>
+                    </>
+                  )}
+
+                  {diagnosticDetail && (
+                    <section className="diagnostic-inspection" aria-label="Selected diagnostic details">
+                      {diagnosticDetail.state === 'loading' && <p role="status">Loading diagnostic details…</p>}
+                      {diagnosticDetail.state === 'error' && <p className="notice notice-error" role="alert">Diagnostic details are unavailable. The active case and evidence selection remain unchanged.</p>}
+                      {diagnosticDetail.state === 'ready' && (
+                        <>
+                          <h4>Inspection: {diagnosticDetail.body.diagnostic.id}</h4>
+                          <DiagnosticFacts diagnostic={diagnosticDetail.body.diagnostic} />
+                          {diagnosticDetail.body.attempts.length > 0 && (
+                            <>
+                              <div className="section-heading">
+                                <h4>Complete event history</h4>
+                                <span>{diagnosticDetail.body.attempts.length} attempt records · one organization-scoped event</span>
+                              </div>
+                              <ol className="attempt-history">
+                                {diagnosticDetail.body.attempts.map((attempt) => {
+                                  const linked = activeCase.evidence.some((item) => item.id === attempt.id);
+                                  const selected = selectedDiagnosticIds.includes(attempt.id);
+                                  return <li className="diagnostic-card" key={attempt.id}>
+                                    <DiagnosticFacts diagnostic={attempt} />
+                                    <label><input type="checkbox" checked={linked || selected} disabled={linked} onChange={(event) => updateDiagnosticSelection(activeCase.id, [attempt.id], event.target.checked)} />
+                                      {linked ? 'Already associated with this case' : 'Select this attempt for association'}</label>
+                                  </li>;
+                                })}
+                              </ol>
+                              {diagnosticDetail.body.attempts.some((item) => !activeCase.evidence.some((linkedItem) => linkedItem.id === item.id)) && (
+                                <button type="button" onClick={() => updateDiagnosticSelection(activeCase.id, diagnosticDetail.body.attempts.filter((item) => !activeCase.evidence.some((linkedItem) => linkedItem.id === item.id)).map((item) => item.id), true)}>
+                                  Select all unlinked attempt records
+                                </button>
+                              )}
+                            </>
+                          )}
+                        </>
+                      )}
+                    </section>
+                  )}
+                </section>
+
+                <section className="knowledge-section" aria-labelledby="knowledge-title">
+                  <div className="section-heading"><h3 id="knowledge-title">Knowledge base</h3><span>Fictional technical guidance · no retrieval or AI</span></div>
+                  {knowledgeError && <p className="notice notice-error" role="alert">{knowledgeError}</p>}
+                  <ul className="knowledge-list">
+                    {knowledgeEntries.map((entry) => (
+                      <li key={entry.id}>
+                        <button type="button" aria-expanded={knowledgeEntry?.id === entry.id && knowledgeEntry.state === 'ready'} onClick={() => inspectKnowledge(entry.id)}>
+                          {entry.id} · {entry.title} · v{entry.version}
+                        </button>
+                      </li>
+                    ))}
+                  </ul>
+                  {knowledgeEntry?.state === 'loading' && <p role="status">Loading knowledge entry…</p>}
+                  {knowledgeEntry?.state === 'error' && <p className="notice notice-error" role="alert">This knowledge entry is unavailable. The case workspace remains open.</p>}
+                  {knowledgeEntry?.state === 'ready' && <article className="knowledge-entry"><h4>{knowledgeEntry.entry.id} · {knowledgeEntry.entry.title}</h4><p>{knowledgeEntry.entry.content}</p></article>}
+                </section>
+
                 <section className="history-section" aria-labelledby="history-title">
                   <div className="section-heading">
                     <h3 id="history-title">Case history</h3>
@@ -597,6 +932,21 @@ function App() {
                             <textarea id="retained-escalation-findings" maxLength={10000} value={selectedDraft.escalationFindings || ''} onChange={(event) => updateDraft(activeCase.id, 'escalationFindings', event.target.value)} />
                             <label htmlFor="retained-outstanding-questions">Unsaved outstanding questions</label>
                             <textarea id="retained-outstanding-questions" maxLength={10000} value={selectedDraft.outstandingQuestions || ''} onChange={(event) => updateDraft(activeCase.id, 'outstandingQuestions', event.target.value)} />
+                            <fieldset className="escalation-evidence">
+                              <legend>Unsaved escalation evidence selection</legend>
+                              {activeCase.evidence.map((diagnostic) => (
+                                <label key={diagnostic.id}>
+                                  <input
+                                    type="checkbox"
+                                    checked={escalationEvidenceIds.includes(diagnostic.id)}
+                                    onChange={(event) => updateDraft(activeCase.id, 'escalationEvidenceIds', event.target.checked
+                                      ? [...new Set([...escalationEvidenceIds, diagnostic.id])]
+                                      : escalationEvidenceIds.filter((id) => id !== diagnostic.id))}
+                                  />
+                                  {diagnostic.id}
+                                </label>
+                              ))}
+                            </fieldset>
                           </div>
                         </div>
                       )}
@@ -636,7 +986,22 @@ function App() {
                           <textarea id="escalation-findings" required maxLength={10000} value={selectedDraft.escalationFindings || ''} onChange={(event) => updateDraft(activeCase.id, 'escalationFindings', event.target.value)} />
                           <label htmlFor="outstanding-questions">Outstanding questions</label>
                           <textarea id="outstanding-questions" maxLength={10000} value={selectedDraft.outstandingQuestions || ''} onChange={(event) => updateDraft(activeCase.id, 'outstandingQuestions', event.target.value)} />
-                          <p className="field-hint">No diagnostic evidence is linked in M2; this escalation records an empty evidence list.</p>
+                          <fieldset className="escalation-evidence">
+                            <legend>Diagnostic evidence already linked to this case</legend>
+                            {activeCase.evidence.length === 0 && <p className="field-hint">No evidence is linked. This escalation will record an empty list.</p>}
+                            {activeCase.evidence.map((diagnostic) => (
+                              <label key={diagnostic.id}>
+                                <input
+                                  type="checkbox"
+                                  checked={escalationEvidenceIds.includes(diagnostic.id)}
+                                  onChange={(event) => updateDraft(activeCase.id, 'escalationEvidenceIds', event.target.checked
+                                    ? [...new Set([...escalationEvidenceIds, diagnostic.id])]
+                                    : escalationEvidenceIds.filter((id) => id !== diagnostic.id))}
+                                />
+                                {diagnostic.id} · {diagnostic.eventId || diagnostic.requestId} · {observedOutcome(diagnostic)}
+                              </label>
+                            ))}
+                          </fieldset>
                         </div>
                       )}
                       {selectedDraft.transitionTarget === 'resolved' && (
@@ -676,6 +1041,12 @@ function PendingAction({ slot, action, busySlot, feedback, retry, reconcile }) {
       {action.type !== 'status' && <blockquote>{action.payload.text}</blockquote>}
       {action.type === 'status' && action.payload.status === 'resolved' && (
         <blockquote>Submitted resolution outcome: {action.payload.outcome}</blockquote>
+      )}
+      {action.type === 'status' && action.payload.status === 'escalated' && (
+        <blockquote>Submitted escalation evidence: {action.payload.evidenceIds?.length ? action.payload.evidenceIds.join(', ') : 'None linked.'}</blockquote>
+      )}
+      {action.type === 'evidence' && (
+        <blockquote>Submitted diagnostic rows: {action.payload.diagnosticIds.join(', ')}</blockquote>
       )}
       {feedback[slot] && <p role="alert">{feedback[slot]}</p>}
       {action.state === 'conflict' ? (
