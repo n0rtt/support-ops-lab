@@ -485,6 +485,7 @@ test('insufficient-information case can be escalated with an empty evidence list
 
 test('an uncertain resolution remains confirmable after reload on a resolved case', async ({ page }) => {
   await page.goto('/#SEW-1003');
+  await expect(page.locator('.case-detail .status')).toBeVisible();
   if (!(await page.locator('.case-detail .status-escalated').count())) {
     await page.getByLabel('Move case to').selectOption('escalated');
     await page.getByLabel('Escalation reason').fill('Engineering must investigate a reproducible upstream issue.');
