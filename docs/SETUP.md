@@ -24,9 +24,9 @@ Simulated replies are labeled **“Simulated reply to customer — not sent.”*
 
 ## Durable data and retries
 
-SQLite stores cases, append-only activities, and mutation receipts. M2 applies schema version 2, which adds an activity-ordering index without adding or replacing domain tables. Case state, activity, version, and idempotency receipt commit in one transaction. Repeating the same key and payload replays its response; reusing a key for changed content or submitting against a stale case version returns a conflict.
+SQLite stores cases, append-only activities, and mutation receipts. M2 applies numbered migrations through schema version 3: the activity sequence is backfilled in timestamp and prior insertion order, then new activities receive a per-case append sequence. The migrations preserve all existing rows and keep the same three domain tables. Case state, activity, version, and idempotency receipt commit in one transaction. Repeating the same key and payload replays its response; reusing a key for changed content or submitting against a stale case version returns a conflict.
 
-The browser saves drafts by case in local storage and retains exact pending requests in session storage. An interrupted request can be retried with the same key. A conflict never resubmits automatically; reload the current case, review the saved draft, then decide what to submit.
+Each browser tab saves its case drafts and exact pending requests in session storage, so reloads retain them without tabs overwriting one another. An interrupted request can be retried with the same key. A conflict never resubmits automatically; reload the current case, review the saved draft, then decide what to submit.
 
 To check persistence manually, stop the server, run **npm run db:init**, and start the server again. Case state and history remain in the database. To restore the initial fictional cases, stop the server first and then run:
 
@@ -47,7 +47,7 @@ Run the production build and real Chromium journeys with:
 
 The browser suite uses a temporary SQLite database and does not touch the local demo database. It covers resolution and preserved history, an escalation with no diagnostic evidence, a filter change that keeps the selected case and draft, an interrupted save retried with the same request key, and stale conflict reconciliation.
 
-The integration tests cover the M1 seed/config/API safeguards, schema v1-to-v2 preservation, filtering and chronological detail, transition validation, required outcomes, terminal resolution, notes/replies after resolution, duplicate receipt replay, concurrent stale writes, HTTP validation, and transaction rollback when a receipt write fails.
+The integration tests cover the M1 seed/config/API safeguards, schema v1-to-v3 preservation and tied-timestamp ordering, activity-based queue order, filtering and chronological detail, transition validation and current-state no-ops, required outcomes, terminal resolution, notes/replies after resolution, duplicate receipt replay, concurrent stale writes, strict Zod HTTP validation, and transaction rollback when a receipt write fails. Chromium checks cover Back/Forward, independent tab drafts, late acknowledgments, edits during pending saves, UTC labels across browser time zones, and the manual workflows.
 
 ## Milestone boundary
 

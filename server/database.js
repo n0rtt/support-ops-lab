@@ -26,6 +26,20 @@ const migrations = [
       db.exec('CREATE INDEX activities_case_order ON activities (case_id, created_at, id)');
     },
   },
+  {
+    version: 3,
+    up(db) {
+      db.exec(
+        'DROP INDEX activities_case_order; ' +
+          'CREATE TABLE activities_with_sequence (id TEXT PRIMARY KEY, case_id TEXT NOT NULL REFERENCES cases(id) ON DELETE CASCADE, created_at TEXT NOT NULL, activity_type TEXT NOT NULL, payload TEXT NOT NULL, sequence INTEGER NOT NULL CHECK (sequence > 0)) STRICT; ' +
+          'INSERT INTO activities_with_sequence (id, case_id, created_at, activity_type, payload, sequence) ' +
+          'SELECT id, case_id, created_at, activity_type, payload, ROW_NUMBER() OVER (PARTITION BY case_id ORDER BY created_at, rowid) FROM activities; ' +
+          'DROP TABLE activities; ' +
+          'ALTER TABLE activities_with_sequence RENAME TO activities; ' +
+          'CREATE UNIQUE INDEX activities_case_order ON activities (case_id, sequence)',
+      );
+    },
+  },
 ];
 
 export function openDatabase(databasePath) {
@@ -71,7 +85,7 @@ function insertInitialCases(db) {
     'INSERT INTO cases (id, organization_id, organization_name, subject, channel, priority, status, created_at, updated_at, version) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 1)',
   );
   const insertActivity = db.prepare(
-    "INSERT INTO activities (id, case_id, created_at, activity_type, payload) VALUES (?, ?, ?, 'initial_report', ?)",
+    "INSERT INTO activities (id, case_id, created_at, activity_type, payload, sequence) VALUES (?, ?, ?, 'initial_report', ?, 1)",
   );
 
   for (const item of initialCases) {
@@ -127,7 +141,7 @@ const caseSelect =
   "SELECT c.id, c.organization_id, c.organization_name, c.subject, c.channel, c.priority, c.status, c.created_at, c.updated_at, c.version, a.payload AS initial_report FROM cases AS c LEFT JOIN activities AS a ON a.case_id = c.id AND a.activity_type = 'initial_report'";
 
 export function listCases(db, status) {
-  const query = caseSelect + (status ? ' WHERE c.status = ?' : '') + ' ORDER BY c.created_at DESC, c.id';
+  const query = caseSelect + (status ? ' WHERE c.status = ?' : '') + ' ORDER BY c.updated_at DESC, c.id';
   return (status ? db.prepare(query).all(status) : db.prepare(query).all()).map(mapCase);
 }
 
@@ -136,23 +150,29 @@ export function getCase(db, caseId) {
   if (!row) return null;
   const item = mapCase(row);
   item.activities = db
-    .prepare('SELECT id, created_at, activity_type, payload FROM activities WHERE case_id = ? ORDER BY created_at, id')
+    .prepare('SELECT id, created_at, activity_type, payload, sequence FROM activities WHERE case_id = ? ORDER BY sequence')
     .all(caseId)
     .map((activity) => ({
       id: activity.id,
       createdAt: activity.created_at,
       type: activity.activity_type,
       payload: JSON.parse(activity.payload),
+      sequence: activity.sequence,
     }));
   return item;
 }
 
+function nextActivitySequence(db, caseId) {
+  return db.prepare('SELECT COALESCE(MAX(sequence), 0) + 1 AS sequence FROM activities WHERE case_id = ?').get(caseId).sequence;
+}
+
 export function appendCaseActivity(db, { caseId, type, text, now = new Date().toISOString() }) {
   const id = 'ACT-' + randomUUID();
+  const sequence = nextActivitySequence(db, caseId);
   db.prepare('UPDATE cases SET updated_at = ?, version = version + 1 WHERE id = ?').run(now, caseId);
   db.prepare(
-    'INSERT INTO activities (id, case_id, created_at, activity_type, payload) VALUES (?, ?, ?, ?, ?)',
-  ).run(id, caseId, now, type, JSON.stringify({ text }));
+    'INSERT INTO activities (id, case_id, created_at, activity_type, payload, sequence) VALUES (?, ?, ?, ?, ?, ?)',
+  ).run(id, caseId, now, type, JSON.stringify({ text }), sequence);
   const version = db.prepare('SELECT version FROM cases WHERE id = ?').get(caseId).version;
   return { changed: true, response: { caseId, activityId: id, version } };
 }
@@ -178,6 +198,13 @@ export class InvalidEscalationEvidenceError extends Error {
   }
 }
 
+export class InvalidStatusContextError extends Error {
+  constructor(code) {
+    super('The requested status transition is missing valid context.');
+    this.code = code;
+  }
+}
+
 export function changeCaseStatus(db, { caseId, status, context = {}, now = new Date().toISOString() }) {
   const current = db.prepare('SELECT status FROM cases WHERE id = ?').get(caseId);
   if (current.status === status) {
@@ -187,19 +214,26 @@ export function changeCaseStatus(db, { caseId, status, context = {}, now = new D
     };
   }
   if (!allowedTransitions[current.status]?.has(status)) throw new InvalidCaseTransitionError();
-  if (status === 'escalated' && (!Array.isArray(context.evidenceIds) || context.evidenceIds.length !== 0)) {
-    throw new InvalidEscalationEvidenceError();
+  if (status === 'escalated') {
+    if (typeof context.reason !== 'string' || !context.reason.trim()) throw new InvalidStatusContextError('invalid_escalation_reason');
+    if (typeof context.findings !== 'string' || !context.findings.trim()) throw new InvalidStatusContextError('invalid_escalation_findings');
+    if (typeof context.questions !== 'string' || context.questions.length > 10000) throw new InvalidStatusContextError('invalid_escalation_questions');
+    if (!Array.isArray(context.evidenceIds) || context.evidenceIds.length !== 0) throw new InvalidEscalationEvidenceError();
+  }
+  if (status === 'resolved' && (typeof context.outcome !== 'string' || !context.outcome.trim())) {
+    throw new InvalidStatusContextError('invalid_resolution_outcome');
   }
 
   const activityId = 'ACT-' + randomUUID();
+  const sequence = nextActivitySequence(db, caseId);
   db.prepare('UPDATE cases SET status = ?, updated_at = ?, version = version + 1 WHERE id = ?').run(
     status,
     now,
     caseId,
   );
   db.prepare(
-    'INSERT INTO activities (id, case_id, created_at, activity_type, payload) VALUES (?, ?, ?, ?, ?)',
-  ).run(activityId, caseId, now, 'status_changed', JSON.stringify({ from: current.status, to: status, ...context }));
+    'INSERT INTO activities (id, case_id, created_at, activity_type, payload, sequence) VALUES (?, ?, ?, ?, ?, ?)',
+  ).run(activityId, caseId, now, 'status_changed', JSON.stringify({ from: current.status, to: status, ...context }), sequence);
   const version = db.prepare('SELECT version FROM cases WHERE id = ?').get(caseId).version;
   return { changed: true, response: { caseId, status, activityId, version } };
 }

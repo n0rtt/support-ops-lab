@@ -61,7 +61,7 @@ async function detail(baseUrl, caseId) {
 }
 
 test('M1 seed and config remain intact with M2 queue filtering and chronological case detail', async (t) => {
-  const { baseUrl } = await testServer(t);
+  const { baseUrl, db } = await testServer(t);
 
   const config = await fetch(baseUrl + '/api/config');
   assert.equal(config.status, 200);
@@ -74,6 +74,8 @@ test('M1 seed and config remain intact with M2 queue filtering and chronological
   const { cases } = await all.json();
   assert.equal(all.status, 200);
   assert.equal(cases.length, 3);
+  assert.deepEqual(cases.map((item) => item.id), ['SEW-1003', 'SEW-1001', 'SEW-1002']);
+  assert.deepEqual(cases.map((item) => item.priority), ['low', 'high', 'medium']);
   assert.deepEqual(cases.map((item) => item.channel).sort(), ['email', 'manual', 'telegram']);
   assert.ok(cases.every((item) => item.id.startsWith('SEW-') && item.initialReport));
   assert.deepEqual(
@@ -84,6 +86,13 @@ test('M1 seed and config remain intact with M2 queue filtering and chronological
     (await (await fetch(baseUrl + '/api/cases?status=in_progress')).json()).cases.map((item) => item.id),
     ['SEW-1002'],
   );
+  const noteResponse = await post(baseUrl, 'SEW-1002', 'queue-latest-activity', {
+    type: 'internal_note', text: 'This case was just updated.', expectedVersion: 1,
+  });
+  assert.equal(noteResponse.status, 200);
+  db.prepare('UPDATE cases SET updated_at = ? WHERE id = ?').run('2026-10-21T00:00:00.000Z', 'SEW-1002');
+  const updatedQueue = await (await fetch(baseUrl + '/api/cases')).json();
+  assert.deepEqual(updatedQueue.cases.map((item) => item.id), ['SEW-1002', 'SEW-1003', 'SEW-1001']);
   assert.equal((await fetch(baseUrl + '/api/cases?status=unknown')).status, 400);
 
   const response = await fetch(baseUrl + '/api/cases/SEW-1001');
@@ -121,7 +130,7 @@ test('notes, simulated replies, resolution, and terminal history are durable and
     db.close();
   });
 
-  const note = { type: 'note', text: 'Confirmed the customer has rotated the API key.', expectedVersion: 1 };
+  const note = { type: 'internal_note', text: 'Confirmed the customer has rotated the API key.', expectedVersion: 1 };
   let response = await post(server.baseUrl, 'SEW-1001', 'manual-note-1', note);
   assert.equal(response.status, 200);
   const savedNote = await response.json();
@@ -153,7 +162,7 @@ test('notes, simulated replies, resolution, and terminal history are durable and
   assert.equal(response.status, 200);
 
   response = await post(server.baseUrl, 'SEW-1001', 'manual-note-after-resolution', {
-    type: 'note',
+    type: 'internal_note',
     text: 'Follow-up recorded after resolution.',
     expectedVersion: 4,
   });
@@ -176,7 +185,7 @@ test('notes, simulated replies, resolution, and terminal history are durable and
   assert.equal(saved.version, 5);
   assert.deepEqual(
     saved.activities.map((activity) => activity.type),
-    ['initial_report', 'note', 'simulated_reply', 'status_changed', 'note'],
+    ['initial_report', 'internal_note', 'simulated_reply', 'status_changed', 'internal_note'],
   );
   assert.equal(saved.activities[2].payload.text, 'Please confirm the next scheduled sync succeeds.');
   assert.equal(saved.activities[3].payload.outcome, 'The API key was rotated and the customer confirmed a successful sync.');
@@ -210,7 +219,6 @@ test('escalation requires findings and questions, accepts empty evidence, and re
     reason: 'The report does not include enough detail to isolate the failure.',
     findings: 'No request ID or exact occurrence time is available.',
     questions: '',
-    evidenceIds: [],
     expectedVersion: 1,
   });
   assert.equal(response.status, 200);
@@ -239,20 +247,34 @@ test('escalation requires findings and questions, accepts empty evidence, and re
   assert.equal(escalations[1].payload.questions, 'Which request IDs and UTC time window are affected?');
 });
 
-test('requesting the current status records a replayable receipt without activity or version changes', async (t) => {
+test('current-state requests in every status are replayable no-ops without changing the case', async (t) => {
   const { baseUrl, db } = await testServer(t);
-  const payload = { status: 'open', expectedVersion: 1 };
+  async function assertNoop(caseId, status, key, context = {}) {
+    const { case: before } = await detail(baseUrl, caseId);
+    const payload = { status, expectedVersion: before.version, ...context };
+    let response = await patchStatus(baseUrl, caseId, key, payload);
+    assert.equal(response.status, 200);
+    assert.deepEqual(await response.json(), { caseId, status, version: before.version, replayed: false });
+    response = await patchStatus(baseUrl, caseId, key, payload);
+    assert.deepEqual(await response.json(), { caseId, status, version: before.version, replayed: true });
+    assert.deepEqual((await detail(baseUrl, caseId)).case, before);
+  }
 
-  let response = await patchStatus(baseUrl, 'SEW-1001', 'current-status-noop', payload);
-  assert.equal(response.status, 200);
-  assert.deepEqual(await response.json(), { caseId: 'SEW-1001', status: 'open', version: 1, replayed: false });
-  response = await patchStatus(baseUrl, 'SEW-1001', 'current-status-noop', payload);
-  assert.deepEqual(await response.json(), { caseId: 'SEW-1001', status: 'open', version: 1, replayed: true });
-
-  const { case: saved } = await detail(baseUrl, 'SEW-1001');
-  assert.equal(saved.version, 1);
-  assert.equal(saved.activities.length, 1);
-  assert.equal(db.prepare('SELECT COUNT(*) AS count FROM mutation_receipts').get().count, 1);
+  await assertNoop('SEW-1001', 'open', 'current-status-noop-open');
+  await assertNoop('SEW-1002', 'in_progress', 'current-status-noop-in-progress');
+  const escalated = await patchStatus(baseUrl, 'SEW-1003', 'prepare-escalated-noop', {
+    status: 'escalated', reason: 'Needs engineering', findings: 'No identifiers.', questions: '', expectedVersion: 1,
+  });
+  assert.equal(escalated.status, 200);
+  await assertNoop('SEW-1003', 'escalated', 'current-status-noop-escalated', {
+    reason: '', findings: '', questions: '',
+  });
+  const resolved = await patchStatus(baseUrl, 'SEW-1001', 'prepare-resolved-noop', {
+    status: 'resolved', outcome: 'The customer confirmed resolution.', expectedVersion: 1,
+  });
+  assert.equal(resolved.status, 200);
+  await assertNoop('SEW-1001', 'resolved', 'current-status-noop-resolved', { outcome: '' });
+  assert.equal(db.prepare('SELECT COUNT(*) AS count FROM mutation_receipts').get().count, 6);
 });
 
 test('strict HTTP validation and failed receipt writes preserve case data with safe errors', async (t) => {
@@ -261,7 +283,7 @@ test('strict HTTP validation and failed receipt writes preserve case data with s
   let response = await fetch(baseUrl + '/api/cases/SEW-1001/activities', {
     method: 'POST',
     headers: { 'content-type': 'application/json', origin: new URL(baseUrl).origin },
-    body: JSON.stringify({ type: 'note', text: 'Missing key', expectedVersion: 1 }),
+    body: JSON.stringify({ type: 'internal_note', text: 'Missing key', expectedVersion: 1 }),
   });
   assert.equal(response.status, 400);
   assert.deepEqual(await response.json(), { error: 'idempotency_key_required' });
@@ -269,7 +291,7 @@ test('strict HTTP validation and failed receipt writes preserve case data with s
   response = await fetch(baseUrl + '/api/cases/SEW-1001/activities', {
     method: 'POST',
     headers: { ...mutationHeaders(baseUrl, 'invalid-origin'), origin: 'https://attacker.example' },
-    body: JSON.stringify({ type: 'note', text: 'Wrong origin', expectedVersion: 1 }),
+    body: JSON.stringify({ type: 'internal_note', text: 'Wrong origin', expectedVersion: 1 }),
   });
   assert.equal(response.status, 403);
 
@@ -280,10 +302,16 @@ test('strict HTTP validation and failed receipt writes preserve case data with s
   assert.deepEqual(await response.json(), { error: 'invalid_json' });
 
   response = await post(baseUrl, 'SEW-1001', 'unknown-field', {
-    type: 'note', text: 'Unknown field', expectedVersion: 1, status: 'resolved',
+    type: 'internal_note', text: 'Unknown field', expectedVersion: 1, status: 'resolved',
   });
   assert.equal(response.status, 400);
   assert.deepEqual(await response.json(), { error: 'unknown_fields' });
+
+  response = await post(baseUrl, 'SEW-1001', 'legacy-note-type', {
+    type: 'note', text: 'Wrong discriminator', expectedVersion: 1,
+  });
+  assert.equal(response.status, 400);
+  assert.deepEqual(await response.json(), { error: 'invalid_activity_type' });
 
   response = await patchStatus(baseUrl, 'SEW-1001', 'missing-resolution-outcome', {
     status: 'resolved',
@@ -296,7 +324,7 @@ test('strict HTTP validation and failed receipt writes preserve case data with s
     "CREATE TRIGGER force_receipt_failure BEFORE INSERT ON mutation_receipts BEGIN SELECT RAISE(ABORT, 'private database detail'); END",
   );
   response = await post(baseUrl, 'SEW-1001', 'atomic-failure', {
-    type: 'note', text: 'Must not partially save', expectedVersion: 1,
+    type: 'internal_note', text: 'Must not partially save', expectedVersion: 1,
   });
   assert.equal(response.status, 500);
   assert.deepEqual(await response.json(), { error: 'save_failed' });
@@ -309,8 +337,8 @@ test('strict HTTP validation and failed receipt writes preserve case data with s
 test('concurrent stale writes conflict without duplicating, and a receipt replays after later changes', async (t) => {
   const { baseUrl } = await testServer(t);
   const requests = [
-    { key: 'concurrent-a', body: { type: 'note', text: 'First tab', expectedVersion: 1 } },
-    { key: 'concurrent-b', body: { type: 'note', text: 'Second tab', expectedVersion: 1 } },
+    { key: 'concurrent-a', body: { type: 'internal_note', text: 'First tab', expectedVersion: 1 } },
+    { key: 'concurrent-b', body: { type: 'internal_note', text: 'Second tab', expectedVersion: 1 } },
   ];
   const attempts = await Promise.all(requests.map(async (request) => ({
     ...request,
@@ -323,7 +351,7 @@ test('concurrent stale writes conflict without duplicating, and a receipt replay
   assert.equal((await winnerResponse.json()).replayed, true);
 
   const next = await post(baseUrl, 'SEW-1001', 'after-concurrent-1', {
-    type: 'note', text: 'Later intentional note', expectedVersion: 2,
+    type: 'internal_note', text: 'Later intentional note', expectedVersion: 2,
   });
   assert.equal(next.status, 200);
   const staleReceiptReplay = await post(baseUrl, 'SEW-1001', winner.key, winner.body);
@@ -331,6 +359,6 @@ test('concurrent stale writes conflict without duplicating, and a receipt replay
 
   const { case: saved } = await detail(baseUrl, 'SEW-1001');
   assert.equal(saved.version, 3);
-  assert.equal(saved.activities.filter((activity) => activity.type === 'note').length, 2);
+  assert.equal(saved.activities.filter((activity) => activity.type === 'internal_note').length, 2);
   assert.equal(saved.activities.filter((activity) => activity.payload.text === 'Second tab').length + saved.activities.filter((activity) => activity.payload.text === 'First tab').length, 1);
 });

@@ -15,7 +15,9 @@ import { pathToFileURL } from 'node:url';
 import { test } from 'node:test';
 import { DatabaseSync } from 'node:sqlite';
 import {
+  appendCaseActivity,
   demoDatabasePath,
+  getCase,
   initializeDatabase,
   openDatabase,
   resetDemoDatabase,
@@ -33,7 +35,7 @@ test('initialization migrates and seeds once without replacing existing records'
   initializeDatabase(db);
   initializeDatabase(db);
 
-  assert.equal(db.prepare('PRAGMA user_version').get().user_version, 2);
+  assert.equal(db.prepare('PRAGMA user_version').get().user_version, 3);
   assert.deepEqual(
     db.prepare("SELECT name FROM sqlite_master WHERE type = 'table' AND name NOT LIKE 'sqlite_%' ORDER BY name")
       .all()
@@ -61,6 +63,8 @@ test('M2 activity-order migration preserves existing cases, activities, and rece
       'CREATE TABLE mutation_receipts (request_key TEXT PRIMARY KEY CHECK (length(request_key) BETWEEN 1 AND 200), fingerprint TEXT NOT NULL, response_json TEXT NOT NULL, created_at TEXT NOT NULL) STRICT; ' +
       "INSERT INTO cases VALUES ('SEW-OLD', 'ORG-OLD', 'Old fictional organization', 'Existing issue', 'email', 'low', 'open', '2026-10-01T00:00:00.000Z', '2026-10-01T00:00:00.000Z', 3); " +
       "INSERT INTO activities VALUES ('ACT-OLD', 'SEW-OLD', '2026-10-01T00:00:00.000Z', 'note', '{\"text\":\"Existing history\"}'); " +
+      "INSERT INTO activities VALUES ('ACT-Z-FIRST', 'SEW-OLD', '2026-10-01T00:01:00.000Z', 'note', '{\"text\":\"First tied activity\"}'); " +
+      "INSERT INTO activities VALUES ('ACT-A-SECOND', 'SEW-OLD', '2026-10-01T00:01:00.000Z', 'note', '{\"text\":\"Second tied activity\"}'); " +
       "INSERT INTO mutation_receipts VALUES ('old-request', 'fingerprint', '{\"ok\":true}', '2026-10-01T00:00:00.000Z'); " +
       'PRAGMA user_version = 1;',
   );
@@ -68,13 +72,21 @@ test('M2 activity-order migration preserves existing cases, activities, and rece
 
   initializeDatabase(db);
 
-  assert.equal(db.prepare('PRAGMA user_version').get().user_version, 2);
+  assert.equal(db.prepare('PRAGMA user_version').get().user_version, 3);
   assert.deepEqual(
     { ...db.prepare('SELECT id, status, version FROM cases WHERE id = ?').get('SEW-OLD') },
     { id: 'SEW-OLD', status: 'open', version: 3 },
   );
   assert.equal(db.prepare('SELECT payload FROM activities WHERE id = ?').get('ACT-OLD').payload, '{"text":"Existing history"}');
   assert.equal(db.prepare('SELECT response_json FROM mutation_receipts WHERE request_key = ?').get('old-request').response_json, '{"ok":true}');
+  assert.deepEqual(
+    db.prepare('SELECT id, sequence FROM activities WHERE case_id = ? ORDER BY sequence').all('SEW-OLD').map((row) => ({ ...row })),
+    [
+      { id: 'ACT-OLD', sequence: 1 },
+      { id: 'ACT-Z-FIRST', sequence: 2 },
+      { id: 'ACT-A-SECOND', sequence: 3 },
+    ],
+  );
   assert.deepEqual(
     db.prepare("SELECT name FROM sqlite_master WHERE type = 'table' AND name NOT LIKE 'sqlite_%' ORDER BY name")
       .all()
@@ -83,8 +95,30 @@ test('M2 activity-order migration preserves existing cases, activities, and rece
   );
   assert.deepEqual(
     db.prepare('PRAGMA index_info(activities_case_order)').all().map((row) => row.name),
-    ['case_id', 'created_at', 'id'],
+    ['case_id', 'sequence'],
   );
+  assert.deepEqual(db.prepare('PRAGMA foreign_key_check').all(), []);
+
+  const request = {
+    requestKey: 'append-after-migration',
+    method: 'POST',
+    route: '/api/cases/SEW-OLD/activities',
+    caseId: 'SEW-OLD',
+    payload: { type: 'internal_note', text: 'Appended after migration' },
+    expectedVersion: 3,
+  };
+  const appended = runIdempotentMutation(db, request, (connection) => appendCaseActivity(connection, {
+    caseId: 'SEW-OLD', type: 'internal_note', text: 'Appended after migration', now: '2026-10-01T00:01:00.000Z',
+  }));
+  assert.equal(appended.response.version, 4);
+  assert.deepEqual(getCase(db, 'SEW-OLD').activities.map(({ payload, sequence }) => [payload.text, sequence]), [
+    ['Existing history', 1],
+    ['First tied activity', 2],
+    ['Second tied activity', 3],
+    ['Appended after migration', 4],
+  ]);
+  initializeDatabase(db);
+  assert.equal(runIdempotentMutation(db, request, () => { throw new Error('must replay'); }).replayed, true);
 });
 
 test('mutation commit, rollback, receipt replay, collision, and stale versions persist', (t) => {
@@ -109,13 +143,14 @@ test('mutation commit, rollback, receipt replay, collision, and stale versions p
       .prepare('UPDATE cases SET status = ?, updated_at = ?, version = version + 1 WHERE id = ? AND version = ?')
       .run('in_progress', '2026-10-20T10:00:00.000Z', 'SEW-1001', 1);
     connection
-      .prepare('INSERT INTO activities (id, case_id, created_at, activity_type, payload) VALUES (?, ?, ?, ?, ?)')
+      .prepare('INSERT INTO activities (id, case_id, created_at, activity_type, payload, sequence) VALUES (?, ?, ?, ?, ?, ?)')
       .run(
         'ACT-SEW-1001-STATUS',
         'SEW-1001',
         '2026-10-20T10:00:00.000Z',
         'status_changed',
         JSON.stringify({ from: 'open', to: 'in_progress' }),
+        2,
       );
     return {
       changed: true,
@@ -216,8 +251,8 @@ test('mutation callbacks must report changes and advance the case version or rol
     () => runIdempotentMutation(db, context, (connection) => {
       connection.prepare('UPDATE cases SET status = ? WHERE id = ?').run('in_progress', 'SEW-1001');
       connection
-        .prepare('INSERT INTO activities (id, case_id, created_at, activity_type, payload) VALUES (?, ?, ?, ?, ?)')
-        .run('ACT-MISSING-VERSION', 'SEW-1001', '2026-10-20T10:00:00.000Z', 'status_changed', '{}');
+        .prepare('INSERT INTO activities (id, case_id, created_at, activity_type, payload, sequence) VALUES (?, ?, ?, ?, ?, ?)')
+        .run('ACT-MISSING-VERSION', 'SEW-1001', '2026-10-20T10:00:00.000Z', 'status_changed', '{}', 2);
       return { changed: true, response: { status: 'in_progress' } };
     }),
     /advance the case version exactly once/,

@@ -1,4 +1,4 @@
-import { useEffect, useState } from 'react';
+import { useEffect, useRef, useState } from 'react';
 import { createRoot } from 'react-dom/client';
 import './styles.css';
 
@@ -45,19 +45,19 @@ function displayValue(value) {
 }
 
 function formatDate(value) {
-  return new Intl.DateTimeFormat(undefined, { dateStyle: 'medium', timeStyle: 'short' }).format(new Date(value));
+  return new Intl.DateTimeFormat('en-GB', { dateStyle: 'medium', timeStyle: 'short', timeZone: 'UTC' }).format(new Date(value)) + ' UTC';
 }
 
 function activityLabel(activity) {
   if (activity.type === 'initial_report') return 'Initial customer report';
-  if (activity.type === 'note') return 'Internal note';
+  if (activity.type === 'note' || activity.type === 'internal_note') return 'Internal note';
   if (activity.type === 'simulated_reply') return 'Simulated reply to customer — not sent';
   return 'System event';
 }
 
 function activitySummary(activity) {
   const payload = activity.payload;
-  if (activity.type === 'initial_report' || activity.type === 'note' || activity.type === 'simulated_reply') {
+  if (activity.type === 'initial_report' || activity.type === 'note' || activity.type === 'internal_note' || activity.type === 'simulated_reply') {
     return payload.text;
   }
   const lines = [];
@@ -72,10 +72,11 @@ function activitySummary(activity) {
 
 function App() {
   const [cases, setCases] = useState([]);
-  const [selectedId, setSelectedId] = useState(selectedCaseFromHash);
+  const selectedIdRef = useRef(selectedCaseFromHash());
+  const [selectedId, setSelectedId] = useState(selectedIdRef.current);
   const [selectedCase, setSelectedCase] = useState(null);
   const [statusFilter, setStatusFilter] = useState(() => readStorage(sessionStorage, filterStorageKey, 'all'));
-  const [drafts, setDrafts] = useState(() => readStorage(localStorage, draftStorageKey, {}));
+  const [drafts, setDrafts] = useState(() => readStorage(sessionStorage, draftStorageKey, {}));
   const [pendingRequests, setPendingRequests] = useState(() => {
     const saved = readStorage(sessionStorage, pendingStorageKey, {});
     return Object.fromEntries(Object.entries(saved).map(([slot, action]) => [
@@ -90,7 +91,7 @@ function App() {
   const [feedback, setFeedback] = useState({});
 
   useEffect(() => {
-    saveStorage(localStorage, draftStorageKey, drafts);
+    saveStorage(sessionStorage, draftStorageKey, drafts);
   }, [drafts]);
 
   useEffect(() => {
@@ -116,7 +117,14 @@ function App() {
   }, [statusFilter]);
 
   useEffect(() => {
-    const syncSelection = () => setSelectedId(selectedCaseFromHash());
+    const syncSelection = () => {
+      const nextId = selectedCaseFromHash();
+      if (selectedIdRef.current === nextId) return;
+      selectedIdRef.current = nextId;
+      setSelectedId(nextId);
+      setSelectedCase(null);
+      setDetailError('');
+    };
     window.addEventListener('hashchange', syncSelection);
     window.addEventListener('popstate', syncSelection);
     return () => {
@@ -128,6 +136,7 @@ function App() {
   useEffect(() => {
     if (loadState !== 'ready' || selectedId || cases.length === 0) return;
     const firstCaseId = cases[0].id;
+    selectedIdRef.current = firstCaseId;
     window.history.replaceState(null, '', '#' + encodeURIComponent(firstCaseId));
     setSelectedId(firstCaseId);
   }, [cases, loadState, selectedId]);
@@ -145,11 +154,12 @@ function App() {
         return body.case;
       })
       .then((item) => {
+        if (selectedIdRef.current !== selectedId) return;
         setSelectedCase(item);
         setDetailError('');
       })
       .catch((error) => {
-        if (error.name === 'AbortError') return;
+        if (error.name === 'AbortError' || selectedIdRef.current !== selectedId) return;
         setSelectedCase(null);
         setDetailError('This case could not be loaded. The selection was kept; choose another case only if you intend to.');
       });
@@ -157,13 +167,19 @@ function App() {
   }, [selectedId]);
 
   function chooseCase(caseId) {
-    if (selectedId === caseId) {
-      refreshCase(caseId).catch(() => setDetailError('This case could not be loaded. The selection was kept; choose another case only if you intend to.'));
+    if (selectedIdRef.current === caseId) {
+      refreshCase(caseId).catch(() => {
+        if (selectedIdRef.current === caseId) {
+          setDetailError('This case could not be loaded. The selection was kept; choose another case only if you intend to.');
+        }
+      });
       return;
     }
     window.history.pushState(null, '', '#' + encodeURIComponent(caseId));
+    selectedIdRef.current = caseId;
     setSelectedId(caseId);
     setSelectedCase(null);
+    setDetailError('');
   }
 
   function updateDraft(caseId, name, value) {
@@ -198,7 +214,7 @@ function App() {
     const response = await fetch('/api/cases/' + encodeURIComponent(caseId));
     const body = await response.json().catch(() => ({}));
     if (!response.ok) throw new Error(body.error || 'case_detail_unavailable');
-    if (selectedId === caseId) {
+    if (selectedIdRef.current === caseId) {
       setSelectedCase(body.case);
       setDetailError('');
     }
@@ -238,42 +254,54 @@ function App() {
 
       acknowledged = true;
       clearPending(slot);
-      if (action.type === 'note' && drafts[action.caseId]?.noteText === action.payload.text) {
-        updateDraft(action.caseId, 'noteText', '');
+      if (action.type === 'internal_note') {
+        setDrafts((current) => {
+          const draft = current[action.caseId] || {};
+          return draft.noteText === action.payload.text
+            ? { ...current, [action.caseId]: { ...draft, noteText: '' } }
+            : current;
+        });
       }
-      if (action.type === 'simulated_reply' && drafts[action.caseId]?.replyText === action.payload.text) {
-        updateDraft(action.caseId, 'replyText', '');
+      if (action.type === 'simulated_reply') {
+        setDrafts((current) => {
+          const draft = current[action.caseId] || {};
+          return draft.replyText === action.payload.text
+            ? { ...current, [action.caseId]: { ...draft, replyText: '' } }
+            : current;
+        });
       }
       if (action.type === 'status') {
-        const currentDraft = drafts[action.caseId] || {};
-        const sameStatusDraft = currentDraft.transitionTarget === action.payload.status && (
-          action.payload.status === 'escalated'
-            ? (currentDraft.escalationReason || '') === action.payload.reason &&
-              (currentDraft.escalationFindings || '') === action.payload.findings &&
-              (currentDraft.outstandingQuestions || '') === action.payload.questions
-            : action.payload.status === 'resolved'
-              ? (currentDraft.resolutionOutcome || '') === action.payload.outcome
-              : true
-        );
-        if (sameStatusDraft) {
-          setDrafts((current) => ({
-            ...current,
-            [action.caseId]: {
-              ...current[action.caseId],
-              transitionTarget: '',
-              escalationReason: '',
-              escalationFindings: '',
-              outstandingQuestions: '',
-              resolutionOutcome: '',
-            },
-          }));
-        }
+        setDrafts((current) => {
+          const draft = current[action.caseId] || {};
+          const sameStatusDraft = draft.transitionTarget === action.payload.status && (
+            action.payload.status === 'escalated'
+              ? (draft.escalationReason || '') === action.payload.reason &&
+                (draft.escalationFindings || '') === action.payload.findings &&
+                (draft.outstandingQuestions || '') === action.payload.questions
+              : action.payload.status === 'resolved'
+                ? (draft.resolutionOutcome || '') === action.payload.outcome
+                : true
+          );
+          return sameStatusDraft
+            ? {
+                ...current,
+                [action.caseId]: {
+                  ...draft,
+                  transitionTarget: '',
+                  escalationReason: '',
+                  escalationFindings: '',
+                  outstandingQuestions: '',
+                  resolutionOutcome: '',
+                },
+              }
+            : current;
+        });
       }
       const refreshResults = await Promise.allSettled([refreshQueue(), refreshCase(action.caseId)]);
       const queueRefreshFailed = refreshResults[0].status === 'rejected';
       const detailRefreshFailed = refreshResults[1].status === 'rejected';
       if (queueRefreshFailed) setQueueError('The save succeeded, but the case queue could not be refreshed.');
-      if (detailRefreshFailed && selectedId === action.caseId) {
+      if (detailRefreshFailed && selectedIdRef.current === action.caseId) {
         setDetailError('The save succeeded, but case history could not be refreshed. Reload to see the latest history.');
       }
       setFeedback((current) => ({
@@ -299,18 +327,19 @@ function App() {
 
   function submitActivity(event, type) {
     event.preventDefault();
-    if (!selectedCase) return;
+    if (!selectedCase || selectedIdRef.current !== selectedCase.id) return;
     const caseId = selectedCase.id;
     const slot = caseId + ':activity:' + type;
     const field = type === 'note' ? 'noteText' : 'replyText';
     const text = drafts[caseId]?.[field] || '';
+    const requestType = type === 'note' ? 'internal_note' : type;
     const action = {
       caseId,
-      type,
+      type: requestType,
       method: 'POST',
       path: '/api/cases/' + encodeURIComponent(caseId) + '/activities',
       key: crypto.randomUUID(),
-      payload: { type, text, expectedVersion: selectedCase.version },
+      payload: { type: requestType, text, expectedVersion: selectedCase.version },
       state: 'uncertain',
     };
     storePending(slot, action);
@@ -319,7 +348,7 @@ function App() {
 
   function submitStatus(event) {
     event.preventDefault();
-    if (!selectedCase) return;
+    if (!selectedCase || selectedIdRef.current !== selectedCase.id) return;
     const caseId = selectedCase.id;
     const draft = drafts[caseId] || {};
     const status = draft.transitionTarget;
@@ -358,9 +387,10 @@ function App() {
     }
   }
 
-  const selectedDraft = selectedCase ? drafts[selectedCase.id] || {} : {};
+  const activeCase = selectedCase?.id === selectedId ? selectedCase : null;
+  const selectedDraft = activeCase ? drafts[activeCase.id] || {} : {};
   const selectedIsOutsideFilter = Boolean(
-    selectedCase && statusFilter !== 'all' && selectedCase.status !== statusFilter,
+    activeCase && statusFilter !== 'all' && activeCase.status !== statusFilter,
   );
 
   return (
@@ -417,6 +447,7 @@ function App() {
                   </span>
                   <strong>{item.subject}</strong>
                   <span className="case-org">{item.organizationName}</span>
+                  <span className="case-card-priority">{displayValue(item.priority)} priority</span>
                   <span className="case-card-bottom">
                     <span>{channelNames[item.channel]}</span>
                     <span>{formatDate(item.updatedAt)}</span>
@@ -427,9 +458,9 @@ function App() {
             </nav>
 
             {detailError && <p className="notice notice-error" role="alert">{detailError}</p>}
-            {!selectedCase && !detailError && selectedId && <p className="notice">Loading case history…</p>}
+            {!activeCase && !detailError && selectedId && <p className="notice">Loading case history…</p>}
 
-            {selectedCase && (
+            {activeCase && (
               <article className="case-detail" aria-labelledby="case-title">
                 {selectedIsOutsideFilter && (
                   <p className="notice filter-notice" role="status">
@@ -437,30 +468,30 @@ function App() {
                   </p>
                 )}
                 <div className="detail-topline">
-                  <p className="eyebrow">Case {selectedCase.id}</p>
-                  <span className={'status status-' + selectedCase.status}>{statusNames[selectedCase.status]}</span>
+                  <p className="eyebrow">Case {activeCase.id}</p>
+                  <span className={'status status-' + activeCase.status}>{statusNames[activeCase.status]}</span>
                 </div>
-                <h2 id="case-title">{selectedCase.subject}</h2>
-                <p className="organization">{selectedCase.organizationName}</p>
+                <h2 id="case-title">{activeCase.subject}</h2>
+                <p className="organization">{activeCase.organizationName}</p>
 
                 <dl className="case-metadata">
-                  <div><dt>Channel</dt><dd>{channelNames[selectedCase.channel]}</dd></div>
-                  <div><dt>Priority</dt><dd>{displayValue(selectedCase.priority)}</dd></div>
-                  <div><dt>Created</dt><dd>{formatDate(selectedCase.createdAt)}</dd></div>
-                  <div><dt>Last activity</dt><dd>{formatDate(selectedCase.updatedAt)}</dd></div>
+                  <div><dt>Channel</dt><dd>{channelNames[activeCase.channel]}</dd></div>
+                  <div><dt>Priority</dt><dd>{displayValue(activeCase.priority)}</dd></div>
+                  <div><dt>Created</dt><dd>{formatDate(activeCase.createdAt)}</dd></div>
+                  <div><dt>Last activity</dt><dd>{formatDate(activeCase.updatedAt)}</dd></div>
                 </dl>
 
                 <section className="history-section" aria-labelledby="history-title">
                   <div className="section-heading">
                     <h3 id="history-title">Case history</h3>
-                    <span>{selectedCase.activities.length} entries · oldest first</span>
+                    <span>{activeCase.activities.length} entries · oldest first</span>
                   </div>
                   <ol className="activity-list">
-                    {selectedCase.activities.map((activity) => (
-                      <li className={'activity activity-' + activity.type} key={activity.id}>
+                    {activeCase.activities.map((activity) => (
+                      <li className={'activity activity-' + (activity.type === 'internal_note' ? 'note' : activity.type)} key={activity.id}>
                         <div className="activity-heading">
                           <strong>{activityLabel(activity)}</strong>
-                          <time dateTime={activity.createdAt}>{formatDate(activity.createdAt)}</time>
+                      <time dateTime={activity.createdAt}>{formatDate(activity.createdAt)}</time>
                         </div>
                         <p>{activitySummary(activity)}</p>
                       </li>
@@ -478,15 +509,15 @@ function App() {
                         id="note-text"
                         maxLength={10000}
                         value={selectedDraft.noteText || ''}
-                        onChange={(event) => updateDraft(selectedCase.id, 'noteText', event.target.value)}
+                        onChange={(event) => updateDraft(activeCase.id, 'noteText', event.target.value)}
                       />
-                      <button type="submit" disabled={!selectedDraft.noteText?.trim() || Boolean(busySlot) || Boolean(pendingRequests[selectedCase.id + ':activity:note'])}>
+                      <button type="submit" disabled={!selectedDraft.noteText?.trim() || Boolean(busySlot) || Boolean(pendingRequests[activeCase.id + ':activity:note'])}>
                         Add internal note
                       </button>
-                      {pendingRequests[selectedCase.id + ':activity:note'] && (
-                        <PendingAction slot={selectedCase.id + ':activity:note'} action={pendingRequests[selectedCase.id + ':activity:note']} busySlot={busySlot} feedback={feedback} retry={sendPending} reconcile={reconcileConflict} />
+                      {pendingRequests[activeCase.id + ':activity:note'] && (
+                        <PendingAction slot={activeCase.id + ':activity:note'} action={pendingRequests[activeCase.id + ':activity:note']} busySlot={busySlot} feedback={feedback} retry={sendPending} reconcile={reconcileConflict} />
                       )}
-                      {feedback[selectedCase.id + ':activity:note'] && <p className="save-feedback" role="status">{feedback[selectedCase.id + ':activity:note']}</p>}
+                      {feedback[activeCase.id + ':activity:note'] && <p className="save-feedback" role="status">{feedback[activeCase.id + ':activity:note']}</p>}
                     </form>
 
                     <form className="action-card reply-card" onSubmit={(event) => submitActivity(event, 'simulated_reply')}>
@@ -496,22 +527,22 @@ function App() {
                         id="reply-text"
                         maxLength={10000}
                         value={selectedDraft.replyText || ''}
-                        onChange={(event) => updateDraft(selectedCase.id, 'replyText', event.target.value)}
+                        onChange={(event) => updateDraft(activeCase.id, 'replyText', event.target.value)}
                       />
-                      <button type="submit" disabled={!selectedDraft.replyText?.trim() || Boolean(busySlot) || Boolean(pendingRequests[selectedCase.id + ':activity:simulated_reply'])}>
+                      <button type="submit" disabled={!selectedDraft.replyText?.trim() || Boolean(busySlot) || Boolean(pendingRequests[activeCase.id + ':activity:simulated_reply'])}>
                         Record simulated reply
                       </button>
-                      {pendingRequests[selectedCase.id + ':activity:simulated_reply'] && (
-                        <PendingAction slot={selectedCase.id + ':activity:simulated_reply'} action={pendingRequests[selectedCase.id + ':activity:simulated_reply']} busySlot={busySlot} feedback={feedback} retry={sendPending} reconcile={reconcileConflict} />
+                      {pendingRequests[activeCase.id + ':activity:simulated_reply'] && (
+                        <PendingAction slot={activeCase.id + ':activity:simulated_reply'} action={pendingRequests[activeCase.id + ':activity:simulated_reply']} busySlot={busySlot} feedback={feedback} retry={sendPending} reconcile={reconcileConflict} />
                       )}
-                      {feedback[selectedCase.id + ':activity:simulated_reply'] && <p className="save-feedback" role="status">{feedback[selectedCase.id + ':activity:simulated_reply']}</p>}
+                      {feedback[activeCase.id + ':activity:simulated_reply'] && <p className="save-feedback" role="status">{feedback[activeCase.id + ':activity:simulated_reply']}</p>}
                     </form>
                   </div>
                 </section>
 
                 <section className="status-section" aria-labelledby="status-title">
                   <h3 id="status-title">Case status</h3>
-                  {selectedCase.status === 'resolved' ? (
+                  {activeCase.status === 'resolved' ? (
                     <p className="terminal-note">Resolved is terminal. Internal notes and simulated replies can still be recorded without changing the resolution.</p>
                   ) : (
                     <form className="status-form" onSubmit={submitStatus}>
@@ -520,35 +551,35 @@ function App() {
                         id="transition-target"
                         required
                         value={selectedDraft.transitionTarget || ''}
-                        onChange={(event) => updateDraft(selectedCase.id, 'transitionTarget', event.target.value)}
+                        onChange={(event) => updateDraft(activeCase.id, 'transitionTarget', event.target.value)}
                       >
                         <option value="">Choose a status</option>
-                        {statusTargets[selectedCase.status].map((status) => <option value={status} key={status}>{statusNames[status]}</option>)}
+                        {statusTargets[activeCase.status].map((status) => <option value={status} key={status}>{statusNames[status]}</option>)}
                       </select>
                       {selectedDraft.transitionTarget === 'escalated' && (
                         <div className="status-fields">
                           <label htmlFor="escalation-reason">Escalation reason</label>
-                          <textarea id="escalation-reason" required maxLength={10000} value={selectedDraft.escalationReason || ''} onChange={(event) => updateDraft(selectedCase.id, 'escalationReason', event.target.value)} />
+                          <textarea id="escalation-reason" required maxLength={10000} value={selectedDraft.escalationReason || ''} onChange={(event) => updateDraft(activeCase.id, 'escalationReason', event.target.value)} />
                           <label htmlFor="escalation-findings">Current findings</label>
-                          <textarea id="escalation-findings" required maxLength={10000} value={selectedDraft.escalationFindings || ''} onChange={(event) => updateDraft(selectedCase.id, 'escalationFindings', event.target.value)} />
+                          <textarea id="escalation-findings" required maxLength={10000} value={selectedDraft.escalationFindings || ''} onChange={(event) => updateDraft(activeCase.id, 'escalationFindings', event.target.value)} />
                           <label htmlFor="outstanding-questions">Outstanding questions</label>
-                          <textarea id="outstanding-questions" maxLength={10000} value={selectedDraft.outstandingQuestions || ''} onChange={(event) => updateDraft(selectedCase.id, 'outstandingQuestions', event.target.value)} />
+                          <textarea id="outstanding-questions" maxLength={10000} value={selectedDraft.outstandingQuestions || ''} onChange={(event) => updateDraft(activeCase.id, 'outstandingQuestions', event.target.value)} />
                           <p className="field-hint">No diagnostic evidence is linked in M2; this escalation records an empty evidence list.</p>
                         </div>
                       )}
                       {selectedDraft.transitionTarget === 'resolved' && (
                         <div className="status-fields">
                           <label htmlFor="resolution-outcome">Resolution outcome</label>
-                          <textarea id="resolution-outcome" required maxLength={10000} value={selectedDraft.resolutionOutcome || ''} onChange={(event) => updateDraft(selectedCase.id, 'resolutionOutcome', event.target.value)} />
+                          <textarea id="resolution-outcome" required maxLength={10000} value={selectedDraft.resolutionOutcome || ''} onChange={(event) => updateDraft(activeCase.id, 'resolutionOutcome', event.target.value)} />
                         </div>
                       )}
-                      <button type="submit" disabled={!selectedDraft.transitionTarget || Boolean(busySlot) || Boolean(pendingRequests[selectedCase.id + ':status'])}>
+                      <button type="submit" disabled={!selectedDraft.transitionTarget || Boolean(busySlot) || Boolean(pendingRequests[activeCase.id + ':status'])}>
                         Save status and history
                       </button>
-                      {pendingRequests[selectedCase.id + ':status'] && (
-                        <PendingAction slot={selectedCase.id + ':status'} action={pendingRequests[selectedCase.id + ':status']} busySlot={busySlot} feedback={feedback} retry={sendPending} reconcile={reconcileConflict} />
+                      {pendingRequests[activeCase.id + ':status'] && (
+                        <PendingAction slot={activeCase.id + ':status'} action={pendingRequests[activeCase.id + ':status']} busySlot={busySlot} feedback={feedback} retry={sendPending} reconcile={reconcileConflict} />
                       )}
-                      {feedback[selectedCase.id + ':status'] && <p className="save-feedback" role="status">{feedback[selectedCase.id + ':status']}</p>}
+                      {feedback[activeCase.id + ':status'] && <p className="save-feedback" role="status">{feedback[activeCase.id + ':status']}</p>}
                     </form>
                   )}
                 </section>

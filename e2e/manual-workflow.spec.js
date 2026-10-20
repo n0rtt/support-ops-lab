@@ -1,8 +1,26 @@
 import { expect, test } from '@playwright/test';
 
+async function holdCommittedResponse(page, matcher) {
+  let release;
+  let committed;
+  const responseHeld = new Promise((resolve) => { release = resolve; });
+  const requestCommitted = new Promise((resolve) => { committed = resolve; });
+  await page.route(matcher, async (route) => {
+    const response = await route.fetch();
+    expect(response.status()).toBe(200);
+    committed();
+    await responseHeld;
+    await route.fulfill({ response });
+  });
+  return { requestCommitted, release };
+}
+
 test('manual resolution preserves history, simulated labeling, selection, and case draft', async ({ page }) => {
   await page.goto('/');
   await expect(page.getByText('M2 manual workflow · no AI credentials needed')).toBeVisible();
+  await expect(page.getByRole('button', { name: /SEW-1001/ }).getByText('High priority', { exact: true })).toBeVisible();
+  await expect(page.getByRole('button', { name: /SEW-1002/ }).getByText('Medium priority', { exact: true })).toBeVisible();
+  await expect(page.getByRole('button', { name: /SEW-1003/ }).getByText('Low priority', { exact: true })).toBeVisible();
   await expect(page).toHaveURL(/#SEW-1003$/);
   await page.getByRole('button', { name: /SEW-1002/ }).click();
   await expect(page).toHaveURL(/#SEW-1002$/);
@@ -46,6 +64,110 @@ test('manual resolution preserves history, simulated labeling, selection, and ca
   await expect(page.getByText('Resolved is terminal. Internal notes and simulated replies can still be recorded without changing the resolution.')).toBeVisible();
 });
 
+test('a late acknowledgment cannot replace the selected case or redirect its next action', async ({ page }) => {
+  await page.goto('/#SEW-1001');
+  let hold = await holdCommittedResponse(page, '**/api/cases/SEW-1001/activities');
+  await page.getByLabel('Visible to support operators only').fill('Saved on SEW-1001 while opening another case.');
+  await page.getByRole('button', { name: 'Add internal note' }).click();
+  await hold.requestCommitted;
+
+  await page.getByRole('button', { name: /SEW-1002/ }).click();
+  await expect(page.getByRole('heading', { name: 'Subscription updates are not appearing' })).toBeVisible();
+  hold.release();
+  await expect(page).toHaveURL(/#SEW-1002$/);
+  await expect(page.getByRole('heading', { name: 'Subscription updates are not appearing' })).toBeVisible();
+  await expect(page.getByRole('button', { name: /SEW-1002/ })).toHaveAttribute('aria-pressed', 'true');
+  await page.unroute('**/api/cases/SEW-1001/activities');
+
+  await page.getByLabel('Visible to support operators only').fill('This note belongs to selected SEW-1002.');
+  const saved = page.waitForResponse((response) => response.request().method() === 'POST' && response.url().endsWith('/api/cases/SEW-1002/activities'));
+  await page.getByRole('button', { name: 'Add internal note' }).click();
+  expect((await saved).status()).toBe(200);
+  const first = await (await page.request.get('/api/cases/SEW-1001')).json();
+  const second = await (await page.request.get('/api/cases/SEW-1002')).json();
+  expect(first.case.activities.at(-1).payload.text).toBe('Saved on SEW-1001 while opening another case.');
+  expect(second.case.activities.at(-1).payload.text).toBe('This note belongs to selected SEW-1002.');
+});
+
+test('newer note, reply, and outcome drafts survive earlier acknowledgments and reload', async ({ page }) => {
+  await page.goto('/#SEW-1002');
+
+  let hold = await holdCommittedResponse(page, '**/api/cases/SEW-1002/activities');
+  const note = page.getByLabel('Visible to support operators only');
+  await note.fill('Submitted note text.');
+  await page.getByRole('button', { name: 'Add internal note' }).click();
+  await hold.requestCommitted;
+  await note.fill('Newer note draft must remain.');
+  hold.release();
+  await expect(page.getByText('Saved.', { exact: true })).toBeVisible();
+  await expect(note).toHaveValue('Newer note draft must remain.');
+  await page.unroute('**/api/cases/SEW-1002/activities');
+
+  hold = await holdCommittedResponse(page, '**/api/cases/SEW-1002/activities');
+  const reply = page.getByLabel('Record a fictional outgoing reply. No message leaves this app.');
+  await reply.fill('Submitted reply text.');
+  await page.getByRole('button', { name: 'Record simulated reply' }).click();
+  await hold.requestCommitted;
+  await reply.fill('Newer reply draft must remain.');
+  hold.release();
+  await expect(page.getByText('Saved.', { exact: true })).toBeVisible();
+  await expect(reply).toHaveValue('Newer reply draft must remain.');
+  await page.unroute('**/api/cases/SEW-1002/activities');
+
+  const statusMatcher = '**/api/cases/SEW-1002/status';
+  hold = await holdCommittedResponse(page, statusMatcher);
+  await page.getByLabel('Move case to').selectOption('resolved');
+  await page.getByLabel('Resolution outcome').fill('Submitted resolution outcome.');
+  await page.getByRole('button', { name: 'Save status and history' }).click();
+  await hold.requestCommitted;
+  await page.getByLabel('Resolution outcome').fill('Newer outcome draft must remain.');
+  hold.release();
+  await expect(page.getByText('Resolution outcome: Submitted resolution outcome.')).toBeVisible();
+  await page.unroute(statusMatcher);
+  await expect.poll(() => page.evaluate(() => JSON.parse(sessionStorage.getItem('supportops.case-drafts.v1'))['SEW-1002'])).toMatchObject({
+    noteText: 'Newer note draft must remain.',
+    replyText: 'Newer reply draft must remain.',
+    resolutionOutcome: 'Newer outcome draft must remain.',
+  });
+
+  await page.reload();
+  await expect(page.getByText('Resolution outcome: Submitted resolution outcome.')).toBeVisible();
+  await expect(note).toHaveValue('Newer note draft must remain.');
+  await expect(reply).toHaveValue('Newer reply draft must remain.');
+  await expect.poll(() => page.evaluate(() => JSON.parse(sessionStorage.getItem('supportops.case-drafts.v1'))['SEW-1002'].resolutionOutcome))
+    .toBe('Newer outcome draft must remain.');
+});
+
+test('separate tabs retain independent case drafts through reload', async ({ page, context }) => {
+  await page.goto('/#SEW-1001');
+  const second = await context.newPage();
+  await second.goto('/#SEW-1002');
+  await page.getByLabel('Visible to support operators only').fill('Draft belongs to SEW-1001.');
+  await second.getByLabel('Visible to support operators only').fill('Draft belongs to SEW-1002.');
+  await expect.poll(() => page.evaluate(() => JSON.parse(sessionStorage.getItem('supportops.case-drafts.v1'))['SEW-1001']?.noteText))
+    .toBe('Draft belongs to SEW-1001.');
+  await expect.poll(() => second.evaluate(() => JSON.parse(sessionStorage.getItem('supportops.case-drafts.v1'))['SEW-1002']?.noteText))
+    .toBe('Draft belongs to SEW-1002.');
+  await page.reload();
+  await second.reload();
+  await expect(page.getByLabel('Visible to support operators only')).toHaveValue('Draft belongs to SEW-1001.');
+  await expect(second.getByLabel('Visible to support operators only')).toHaveValue('Draft belongs to SEW-1002.');
+});
+
+test('history timestamps are explicitly UTC and independent of browser timezone', async ({ browser }) => {
+  const timestamps = [];
+  for (const timezoneId of ['Europe/Prague', 'America/Los_Angeles']) {
+    const context = await browser.newContext({ timezoneId });
+    const page = await context.newPage();
+    await page.goto('http://127.0.0.1:4173/#SEW-1001');
+    const time = page.locator('.activity-list time').first();
+    await expect(time).toContainText('UTC');
+    timestamps.push(await time.innerText());
+    await context.close();
+  }
+  expect(timestamps[0]).toBe(timestamps[1]);
+});
+
 test('insufficient-information case can be escalated with an empty evidence list', async ({ page }) => {
   await page.goto('/');
   await page.getByRole('button', { name: /SEW-1003/ }).click();
@@ -87,7 +209,7 @@ test('interrupted saves retry with the same key and stale conflicts require expl
     const response = await fetch('/api/cases/SEW-1002/activities', {
       method: 'POST',
       headers: { 'content-type': 'application/json', 'idempotency-key': 'browser-other-tab' },
-      body: JSON.stringify({ type: 'note', text: 'Saved from another tab.', expectedVersion }),
+      body: JSON.stringify({ type: 'internal_note', text: 'Saved from another tab.', expectedVersion }),
     });
     return { status: response.status, body: await response.json() };
   }, current.version);

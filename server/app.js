@@ -10,17 +10,45 @@ import {
   IdempotencyKeyReusedError,
   InvalidCaseTransitionError,
   InvalidEscalationEvidenceError,
+  InvalidStatusContextError,
   listCases,
   runIdempotentMutation,
   StaleCaseError,
 } from './database.js';
+import { z } from 'zod';
 
 const serverDirectory = dirname(fileURLToPath(import.meta.url));
 const defaultBuildDirectory = resolve(serverDirectory, '../dist');
 const localHostnames = new Set(['127.0.0.1', 'localhost']);
-const statuses = new Set(['open', 'in_progress', 'escalated', 'resolved']);
-const activityTypes = new Set(['note', 'simulated_reply']);
 const caseIdPattern = /^[A-Za-z0-9][A-Za-z0-9_-]{0,63}$/;
+const statusSchema = z.enum(['open', 'in_progress', 'escalated', 'resolved']);
+const expectedVersionSchema = z.number().int().min(1).max(Number.MAX_SAFE_INTEGER);
+const nonblankTextSchema = z.string().min(1).max(10000).refine((value) => value.trim().length > 0);
+const boundedTextSchema = z.string().max(10000);
+const caseIdSchema = z.string().regex(caseIdPattern);
+const requestKeySchema = z.string().max(200).refine((value) => value.trim().length > 0);
+const activityBodySchema = z.strictObject({
+  type: z.enum(['internal_note', 'simulated_reply']),
+  text: nonblankTextSchema,
+  expectedVersion: expectedVersionSchema,
+});
+const statusBodySchema = z.discriminatedUnion('status', [
+  z.strictObject({ status: z.literal('open'), expectedVersion: expectedVersionSchema }),
+  z.strictObject({ status: z.literal('in_progress'), expectedVersion: expectedVersionSchema }),
+  z.strictObject({
+    status: z.literal('escalated'),
+    expectedVersion: expectedVersionSchema,
+    reason: boundedTextSchema.optional(),
+    findings: boundedTextSchema.optional(),
+    questions: boundedTextSchema.optional(),
+    evidenceIds: z.array(z.string()).length(0).optional().default([]),
+  }),
+  z.strictObject({
+    status: z.literal('resolved'),
+    expectedVersion: expectedVersionSchema,
+    outcome: boundedTextSchema.optional(),
+  }),
+]);
 
 class RequestValidationError extends Error {
   constructor(code) {
@@ -30,76 +58,42 @@ class RequestValidationError extends Error {
   }
 }
 
-function requireObject(value) {
-  if (!value || typeof value !== 'object' || Array.isArray(value)) {
-    throw new RequestValidationError('invalid_request');
-  }
-}
-
-function requireKeys(value, expectedKeys) {
-  if (Object.keys(value).some((key) => !expectedKeys.has(key))) {
-    throw new RequestValidationError('unknown_fields');
-  }
-}
-
-function requireText(value, code, { allowBlank = false } = {}) {
-  if (
-    typeof value !== 'string' ||
-    value.length > 10000 ||
-    (!allowBlank && value.trim().length === 0)
-  ) {
-    throw new RequestValidationError(code);
-  }
-  return value;
-}
-
-function validateExpectedVersion(value) {
-  if (!Number.isSafeInteger(value) || value < 1) {
-    throw new RequestValidationError('invalid_expected_version');
-  }
+function parseRequest(schema, value, codes) {
+  const result = schema.safeParse(value);
+  if (result.success) return result.data;
+  const issue = result.error.issues.find((item) => item.code === 'unrecognized_keys') || result.error.issues[0];
+  const code = issue.code === 'unrecognized_keys'
+    ? 'unknown_fields'
+    : codes[issue.path[0]] || 'invalid_request';
+  throw new RequestValidationError(code);
 }
 
 function validateCaseId(caseId) {
-  if (!caseIdPattern.test(caseId)) throw new RequestValidationError('invalid_case_id');
+  if (!caseIdSchema.safeParse(caseId).success) throw new RequestValidationError('invalid_case_id');
 }
 
 function validateRequestKey(requestKey) {
-  if (typeof requestKey !== 'string' || requestKey.trim().length === 0 || requestKey.length > 200) {
-    throw new RequestValidationError('idempotency_key_required');
-  }
+  if (!requestKeySchema.safeParse(requestKey).success) throw new RequestValidationError('idempotency_key_required');
 }
 
 function validateActivityBody(body) {
-  requireObject(body);
-  requireKeys(body, new Set(['type', 'text', 'expectedVersion']));
-  if (!activityTypes.has(body.type)) throw new RequestValidationError('invalid_activity_type');
-  requireText(body.text, 'invalid_text');
-  validateExpectedVersion(body.expectedVersion);
-  return { type: body.type, text: body.text, expectedVersion: body.expectedVersion };
+  return parseRequest(activityBodySchema, body, {
+    type: 'invalid_activity_type',
+    text: 'invalid_text',
+    expectedVersion: 'invalid_expected_version',
+  });
 }
 
 function validateStatusBody(body) {
-  requireObject(body);
-  if (!statuses.has(body.status)) throw new RequestValidationError('invalid_status');
-  validateExpectedVersion(body.expectedVersion);
-
-  const payload = { status: body.status, expectedVersion: body.expectedVersion };
-  if (body.status === 'escalated') {
-    requireKeys(body, new Set(['status', 'expectedVersion', 'reason', 'findings', 'questions', 'evidenceIds']));
-    payload.reason = requireText(body.reason, 'invalid_escalation_reason');
-    payload.findings = requireText(body.findings, 'invalid_escalation_findings');
-    payload.questions = requireText(body.questions, 'invalid_escalation_questions', { allowBlank: true });
-    if (!Array.isArray(body.evidenceIds) || body.evidenceIds.length !== 0) {
-      throw new RequestValidationError('invalid_evidence');
-    }
-    payload.evidenceIds = [];
-  } else if (body.status === 'resolved') {
-    requireKeys(body, new Set(['status', 'expectedVersion', 'outcome']));
-    payload.outcome = requireText(body.outcome, 'invalid_resolution_outcome');
-  } else {
-    requireKeys(body, new Set(['status', 'expectedVersion']));
-  }
-  return payload;
+  return parseRequest(statusBodySchema, body, {
+    status: 'invalid_status',
+    expectedVersion: 'invalid_expected_version',
+    reason: 'invalid_escalation_reason',
+    findings: 'invalid_escalation_findings',
+    questions: 'invalid_escalation_questions',
+    evidenceIds: 'invalid_evidence',
+    outcome: 'invalid_resolution_outcome',
+  });
 }
 
 function sendMutationError(res, error) {
@@ -110,7 +104,9 @@ function sendMutationError(res, error) {
   if (error instanceof IdempotencyKeyReusedError || error instanceof StaleCaseError || error instanceof InvalidCaseTransitionError) {
     return res.status(409).json({ error: error.code });
   }
-  if (error instanceof InvalidEscalationEvidenceError) return res.status(400).json({ error: error.code });
+  if (error instanceof InvalidEscalationEvidenceError || error instanceof InvalidStatusContextError) {
+    return res.status(400).json({ error: error.code });
+  }
   if (error.code === 'SQLITE_BUSY' || error.code === 'SQLITE_LOCKED') {
     return res.status(503).json({ error: 'save_temporarily_unavailable' });
   }
@@ -152,7 +148,7 @@ export function createApp({ db, buildDirectory = defaultBuildDirectory }) {
 
   app.get('/api/cases', (req, res) => {
     const status = req.query.status;
-    if (status !== undefined && (typeof status !== 'string' || !statuses.has(status))) {
+    if (status !== undefined && !statusSchema.safeParse(status).success) {
       return res.status(400).json({ error: 'invalid_status_filter' });
     }
     try {

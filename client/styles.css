@@ -53,6 +53,7 @@ h1 { margin-bottom: 0; color: #142c36; font-size: clamp(1.75rem, 4vw, 2.4rem); l
 .case-id { color: var(--ink-muted); font-size: 0.76rem; font-weight: 650; letter-spacing: 0.04em; }
 .case-card strong { color: #1a303c; line-height: 1.35; }
 .case-org { color: var(--ink-muted); font-size: 0.9rem; }
+.case-card-priority { color: #465d69; font-size: 0.78rem; font-weight: 650; }
 .case-card-bottom { color: var(--ink-muted); font-size: 0.75rem; }
 .status { display: inline-flex; align-items: center; padding: 4px 8px; border-radius: 999px; color: #355163; background: #edf2f5; font-size: 0.72rem; font-weight: 700; white-space: nowrap; }
 .status-in_progress { color: #81551b; background: #fff4d8; }
